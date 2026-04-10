@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS machine_status (
     uptime DOUBLE,
     last_heartbeat BIGINT,
     temperature DOUBLE DEFAULT 0,
-    watt INT DEFAULT 0;
+    watt INT DEFAULT 0,
     FOREIGN KEY (machine_id) REFERENCES machines(machine_id)
 );
 
@@ -57,7 +57,7 @@ CREATE TABLE wallet_nonces (
     nonce VARCHAR(255) NOT NULL,
     session_id VARCHAR(255) NOT NULL UNIQUE,
     timestamp BIGINT,
-    message TEXT;
+    message TEXT,
     is_used BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
