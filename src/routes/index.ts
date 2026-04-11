@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { getHealth } from '../controllers/healthController';
 import { login, getNonce } from '../controllers/authController';
 import { authenticateToken } from '../middleware/auth';
-import { verifyWallet } from '../controllers/authController';
+import { verifyWallet, validateInstallToken } from '../controllers/authController';
 import { onboardMachine, getMachine, getAllMachines, getMachineStatus, getMachineTelemetry } from '../controllers/machineController';
 
 
@@ -41,6 +41,7 @@ router.get('/health', getHealth);
 router.post('/auth/login', login);
 router.get('/auth/nonce', getNonce);
 router.post('/auth/verify', verifyWallet);
+router.post('/validate-token', validateInstallToken);
 
 // Example protected route
 /**
