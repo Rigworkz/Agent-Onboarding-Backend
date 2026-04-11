@@ -50,14 +50,20 @@ CREATE TABLE IF NOT EXISTS machine_telemetry (
     FOREIGN KEY (machine_id) REFERENCES machines(machine_id), 
     INDEX (machine_id, timestamp)
 );
-
-CREATE TABLE wallet_nonces (
+CREATE TABLE wallet_sessions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     address VARCHAR(100) NOT NULL,
-    nonce VARCHAR(255) NOT NULL,
     session_id VARCHAR(255) NOT NULL UNIQUE,
+
     timestamp BIGINT,
     message TEXT,
     is_used BOOLEAN DEFAULT FALSE,
+    nonce VARCHAR(255) NOT NULL,
+    message TEXT,
+    is_verified BOOLEAN DEFAULT FALSE,       -- tracks signature verification
+    install_token VARCHAR(255),              -- short-lived token
+    token_expires_at BIGINT,              -- token expiry time
+    token_is_used BOOLEAN DEFAULT FALSE,     -- one-time use check
+    timestamp BIGINT,                        -- original message timestamp
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
