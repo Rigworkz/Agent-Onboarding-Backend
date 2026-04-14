@@ -106,7 +106,8 @@ router.get('/protected', authenticateToken, (req, res) => {
  *       200:
  *         description: Machine onboarded successfully
  */
-router.post('/onboard', authenticateToken, onboardMachine);
+//router.post('/onboard', authenticateToken, onboardMachine);
+router.post('/onboard', onboardMachine);
 /**
  * @swagger
  * /api/machine/{machine_id}:
@@ -122,7 +123,8 @@ router.post('/onboard', authenticateToken, onboardMachine);
  *       200:
  *         description: Machine data
  */
-router.get('/machine/:machine_id', authenticateToken, getMachine);
+//router.get('/machine/:machine_id', authenticateToken, getMachine);
+router.get('/machine/:machine_id', getMachine);
 router.get('/machine/:machine_id/status', authenticateToken, getMachineStatus);
 
 // Operator Routes
