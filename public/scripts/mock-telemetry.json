@@ -1,0 +1,25 @@
+{
+  "INFO": {
+    "type": "mock-miner"
+  },
+  "STATS": [
+    {
+      "rate_avg": 12500,
+      "rate_30m": 12300,
+      "rate_5s": 12650,
+      "elapsed": 86400,
+      "watt": 3200,
+      "fan": [65, 67, 70],
+      "chain": [
+        {
+          "hw": 0,
+          "temp_chip": [58, 60, 61]
+        },
+        {
+          "hw": 1,
+          "temp_chip": [59, 62, 64]
+        }
+      ]
+    }
+  ]
+}
