@@ -100,8 +100,11 @@ export const verifyWallet = async (req: Request, res: Response) => {
         message: "sessionId, signature and address are required",
       });
     }
-
     const connection = await pool.getConnection();
+    await connection.query(
+      `UPDATE wallet_sessions SET signature = ? WHERE session_id = ?`,
+      [signature, sessionId]
+    );
 
     //  Fetch session from DB
     const [rows]: any = await connection.query(

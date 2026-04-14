@@ -196,7 +196,7 @@ export const onboardMachine = async (req: Request, res: Response) => {
         const status = data.status;
         const telemetry = data.telemetry;
 
-        // console.log("FULL BODY:", req.body);
+        console.log("FULL BODY:", req.body);
         if (!machine || !status || !telemetry) {
             return res.status(400).json({ message: 'Invalid payload structure' });
         }

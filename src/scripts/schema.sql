@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS machines (
     operator_wallet VARCHAR(255),
     worker_id VARCHAR(100),
     fingerprint VARCHAR(255) UNIQUE,
-    created_at BIGINT
+    created_at BIGINT,
+    signature TEXT
 );
 
 CREATE TABLE IF NOT EXISTS machine_status (
@@ -65,5 +66,6 @@ CREATE TABLE wallet_sessions (
     token_expires_at BIGINT,              -- token expiry time
     token_is_used BOOLEAN DEFAULT FALSE,     -- one-time use check
     timestamp BIGINT,                        -- original message timestamp
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    signature TEXT
 );
