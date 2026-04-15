@@ -3,7 +3,7 @@ import { getHealth } from '../controllers/healthController';
 import { login, getNonce } from '../controllers/authController';
 import { authenticateToken } from '../middleware/auth';
 import { verifyWallet, validateInstallToken } from '../controllers/authController';
-import { onboardMachine, getMachine, getAllMachines, getMachineStatus, getMachineTelemetry } from '../controllers/machineController';
+import { onboardMachine, getMachine, getAllMachines, getMachineStatus, getMachineTelemetry, getMachineIdByWallet } from '../controllers/machineController';
 
 
 
@@ -42,6 +42,8 @@ router.post('/auth/login', login);
 router.get('/auth/nonce', getNonce);
 router.post('/auth/verify', verifyWallet);
 router.post('/validate-token', validateInstallToken);
+router.get("/machine-id/:address", getMachineIdByWallet);
+
 
 // Example protected route
 /**

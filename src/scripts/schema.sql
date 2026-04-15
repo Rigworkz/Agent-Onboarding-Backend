@@ -18,10 +18,10 @@
 -- );
 
 CREATE TABLE IF NOT EXISTS machines (
-    machine_id VARCHAR(100) PRIMARY KEY,
+    operator_wallet VARCHAR(255) PRIMARY KEY,
+    machine_id VARCHAR(100) UNIQUE,
     operator VARCHAR(100),
     pool VARCHAR(100),
-    operator_wallet VARCHAR(255),
     worker_id VARCHAR(100),
     fingerprint VARCHAR(255) UNIQUE,
     created_at BIGINT,
@@ -29,18 +29,20 @@ CREATE TABLE IF NOT EXISTS machines (
 );
 
 CREATE TABLE IF NOT EXISTS machine_status (
-    machine_id VARCHAR(100) PRIMARY KEY,
-    status VARCHAR(50), -- active / offline / suspended
+    operator_wallet VARCHAR(255) PRIMARY KEY,
+    machine_id VARCHAR(100),
+    status VARCHAR(50),
     hashrate DOUBLE,
     uptime DOUBLE,
     last_heartbeat BIGINT,
     temperature DOUBLE DEFAULT 0,
     watt INT DEFAULT 0,
-    FOREIGN KEY (machine_id) REFERENCES machines(machine_id)
+    FOREIGN KEY (operator_wallet) REFERENCES machines(operator_wallet)
 );
 
 CREATE TABLE IF NOT EXISTS machine_telemetry (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    operator_wallet VARCHAR(255),
     machine_id VARCHAR(100),
     hashrate DOUBLE,
     rate_avg DOUBLE,
@@ -48,7 +50,7 @@ CREATE TABLE IF NOT EXISTS machine_telemetry (
     uptime DOUBLE,
     watt INT,
     timestamp BIGINT,
-    FOREIGN KEY (machine_id) REFERENCES machines(machine_id), 
+    FOREIGN KEY (operator_wallet) REFERENCES machines(operator_wallet),
     INDEX (machine_id, timestamp)
 );
 CREATE TABLE wallet_sessions (
@@ -67,5 +69,6 @@ CREATE TABLE wallet_sessions (
     token_is_used BOOLEAN DEFAULT FALSE,     -- one-time use check
     timestamp BIGINT,                        -- original message timestamp
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    signature TEXT
+    signature TEXT,
+    machine_id VARCHAR(100);
 );

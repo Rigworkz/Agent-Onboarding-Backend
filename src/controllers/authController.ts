@@ -238,3 +238,4 @@ export const validateInstallToken = async (req: Request, res: Response) => {
     if (connection) connection.release();
   }
 };
+
