@@ -1,7 +1,7 @@
 param(
     [string]$Payload,
     [string]$BackendUrl = "http://35.224.207.37:5000",
-    [string]$AgentUrl = "http://35.224.207.37:5000/scripts/agent.js"
+    [string]$AgentUrl = "http://35.224.207.37:5000/scripts/agent.js",
     [string]$MockTelemetryUrl = "http://35.224.207.37:5000/scripts/mock-telemetry.json",
     [string]$InstallDir = "C:\rigworkz-agent"
 )
@@ -16,9 +16,12 @@ try {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     }
 
+    $machineId = [guid]::NewGuid().ToString()
+
     $config = @{
         payload    = $Payload
         backendUrl = $BackendUrl
+        machine_id = $machineId
     } | ConvertTo-Json -Depth 5
 
     $configPath = Join-Path $InstallDir "config.json"

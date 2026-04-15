@@ -84,6 +84,10 @@ async function verifyWallet() {
   const parsed = JSON.parse(response.replace(/^\uFEFF/, ""));
 
   isClaimable = parsed.success === true;
+
+  if (parsed.wallet) {
+    global.operatorWallet = parsed.wallet;
+  }
   verificationDone = true;
   verificationMessage = isClaimable
     ? "Installation Verified"
@@ -101,16 +105,18 @@ async function sendToBackend(heartbeat) {
       Buffer.from(config.payload, "base64").toString("utf8"),
     );
 
-    const machineId =
-      decoded.machine_id ||
-      (storedTelemetryHash ? storedTelemetryHash.slice(0, 12) : "rig-unknown");
+    if (!config.machine_id) {
+      throw new Error("machine_id missing in config");
+    }
+
+    const machineId = config.machine_id;
 
     const payload = {
       machine: {
         machine_id: machineId,
         operator: decoded.operator || "unknown",
         pool: decoded.pool || "unknown",
-        operator_wallet: decoded.wallet || "unknown",
+        operator_wallet: global.operatorWallet || "unknown",
         worker_id: decoded.worker_id || "worker-1",
         fingerprint: storedTelemetryHash,
         created_at: Date.now(),
