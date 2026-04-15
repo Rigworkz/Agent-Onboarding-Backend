@@ -16,6 +16,10 @@ let verificationDone = false;
 let verificationMessage = "Pending";
 let backendUrl = "http://localhost:3001";
 
+// heartbeat-based status tracking
+let lastHeartbeatAt = null;
+let rigStatus = "OFFLINE";
+
 // ─── Telemetry Hash Storage ──────────────────────────────
 let storedTelemetryHash = null;
 
@@ -203,12 +207,30 @@ async function poll() {
       max_chip_temp: maxTemp,
     };
 
+    const now = Date.now();
+
+    // heartbeat-based online/offline detection
+    if (lastHeartbeatAt !== null) {
+      const heartbeatAgeMs = now - lastHeartbeatAt;
+
+      if (heartbeatAgeMs < 60 * 1000) {
+        rigStatus = "ONLINE";
+      } else if (heartbeatAgeMs > 2 * 60 * 1000) {
+        rigStatus = "OFFLINE";
+      }
+      // Between 60s and 120s, keep previous status
+    } else {
+      rigStatus = "ONLINE";
+    }
+
+    lastHeartbeatAt = now;
+
     const heartbeat = {
       batch_id: crypto.randomUUID(),
-      timestamp_ms: Date.now(),
+      timestamp_ms: now,
       miner_host: "mock",
       miner_type: data.INFO?.type ?? "mock",
-      status: metrics.hashrate_ths > 0 ? "ONLINE" : "OFFLINE",
+      status: rigStatus,
       claimable: isClaimable,
       verification_done: verificationDone,
       verification_message: verificationMessage,
@@ -226,7 +248,7 @@ async function poll() {
 
     console.log(JSON.stringify(heartbeat, null, 2));
 
-    // ✅ NEW: send to backend
+    // send to backend
     await sendToBackend(heartbeat);
   } catch (err) {
     log("ERROR", err.message);
