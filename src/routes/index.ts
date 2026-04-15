@@ -123,8 +123,8 @@ router.post('/onboard', onboardMachine);
  *       200:
  *         description: Machine data
  */
-//router.get('/machine/:machine_id', authenticateToken, getMachine);
-router.get('/machine/:machine_id', getMachine);
+router.get('/machine/:machine_id', authenticateToken, getMachine);
+
 router.get('/machine/:machine_id/status', authenticateToken, getMachineStatus);
 
 // Operator Routes
