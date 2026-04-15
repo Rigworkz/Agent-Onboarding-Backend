@@ -289,15 +289,26 @@ export const getMachine = async (req: Request, res: Response) => {
 
         const [rows] = await connection.execute<RowDataPacket[]>(
             `SELECT 
-                m.*,
-                s.*
-             FROM machines m
-             LEFT JOIN machine_status s 
-             ON m.machine_id = s.machine_id
-             WHERE m.machine_id = ?`,
+            m.operator_wallet,
+            m.machine_id,
+            m.operator,
+            m.pool,
+            m.worker_id,
+            m.fingerprint,
+            m.created_at,
+            m.signature,
+            s.status,
+            s.hashrate,
+            s.uptime,
+            s.last_heartbeat,
+            s.temperature,
+            s.watt
+        FROM machines m
+        LEFT JOIN machine_status s 
+        ON m.operator_wallet = s.operator_wallet
+        WHERE m.machine_id = ?`,
             [machine_id]
         );
-
         if (rows.length === 0) {
             return res.status(404).json({ message: 'Machine not found' });
         }
@@ -333,7 +344,7 @@ export const getMachineStatus = async (req: Request, res: Response) => {
         console.error('Error fetching status:', error);
         res.status(500).json({ message: 'Internal server error' });
     } finally {
-        if (connection) connection.release(); // ✅ always release
+        if (connection) connection.release(); // 
     }
 };
 
@@ -408,5 +419,32 @@ export const getAllMachines = async (req: Request, res: Response) => {
         res.status(500).json({ message: "Internal server error" });
     } finally {
         if (connection) connection.release();
+    }
+};
+
+export const getMachineIdByWallet = async (req: Request, res: Response) => {
+    try {
+        const { address } = req.params;
+
+        const connection = await pool.getConnection();
+
+        const [rows]: any = await connection.execute(
+            `SELECT machine_id FROM machines WHERE operator_wallet = ?`,
+            [address]
+        );
+
+        connection.release();
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: "Machine not found" });
+        }
+
+        return res.json({
+            machine_id: rows[0].machine_id
+        });
+
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({ message: "Server error" });
     }
 };
