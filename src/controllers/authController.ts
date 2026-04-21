@@ -93,149 +93,230 @@ export const verifyWallet = async (req: Request, res: Response) => {
   try {
     const { address, sessionId, signature } = req.body;
 
-    console.log("VERIFY CALLED:", sessionId);
-
-    if (!sessionId || !signature || !address) {
-      return res.status(400).json({
-        message: "sessionId, signature and address are required",
-      });
-    }
-    const connection = await pool.getConnection();
-    await connection.query(
-      `UPDATE wallet_sessions SET signature = ? WHERE session_id = ?`,
-      [signature, sessionId]
-    );
-
-    //  Fetch session from DB
-    const [rows]: any = await connection.query(
-      `SELECT * FROM wallet_sessions WHERE session_id = ?`,
-      [sessionId]
+    // 1. Fetch session from DB
+    const [rows]: any = await pool.query(
+      `SELECT * FROM wallet_sessions WHERE session_id = ? AND address = ?`,
+      [sessionId, address]
     );
 
     if (rows.length === 0) {
-      connection.release();
       return res.status(400).json({ message: "Invalid session" });
     }
 
     const session = rows[0];
 
-    //  Check already used
-    if (session.is_verified) {
-      connection.release();
-      return res.status(400).json({ message: "Session already verified" });
-    }
+    // 2. Recreate message
+    const message = `Welcome to RigWorkZ Wallet: ${address} Nonce: ${session.nonce} Timestamp: ${session.timestamp}`;
 
-    // Expiry check (5 min)
-    const now = Date.now();
-    const sessionTime = session.timestamp;
-
-    if (now - sessionTime > 5 * 60 * 1000) {
-      connection.release();
-      return res.status(400).json({ message: "Session expired" });
-    }
-
-    //Reconstruct message (DO NOT trust frontend)
-    const message = `Welcome to RigWorkZ Wallet: ${session.address} Nonce: ${session.nonce} Timestamp: ${session.timestamp}`;
-
-    console.log(" Message used:", message);
-
-    //  Verify signature
+    // 3. Verify signature (you already have logic or use ethers)
     const recoveredAddress = ethers.verifyMessage(message, signature);
 
-    if (recoveredAddress.toLowerCase() !== session.address.toLowerCase()) {
-      connection.release();
+    if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
       return res.status(400).json({ message: "Invalid signature" });
     }
 
-    // Generate install token
-    const installToken = crypto.randomBytes(32).toString("hex");
-    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min
-
-    // Update DB
-    await connection.query(
-      `UPDATE wallet_sessions 
-       SET is_verified = true, install_token = ?, token_expires_at = ? 
-       WHERE session_id = ?`,
-      [installToken, expiresAt, sessionId]
+    // 4. Mark session verified
+    await pool.query(
+      `UPDATE wallet_sessions SET is_verified = true WHERE session_id = ?`,
+      [sessionId]
     );
 
-    connection.release();
+    //  5. GENERATE JWT HERE
+    const secret = process.env.JWT_SECRET || "your_jwt_secret";
 
-    //  Return response
+    const token = jwt.sign(
+      { operator_wallet: address },
+      secret,
+      { expiresIn: "1h" }
+    );
+
     return res.json({
       success: true,
-      wallet: recoveredAddress,
-      installToken,
+      token
     });
 
   } catch (error) {
-    console.error(" Verify error:", error);
+    console.error("Verify error:", error);
     return res.status(500).json({ message: "Internal server error" });
   }
 };
 
-export const validateInstallToken = async (req: Request, res: Response) => {
-  let connection;
+
+export const validateInstallToken = (req: any, res: any) => {
   try {
-    console.log(" Validate Token API HIT");
+    const authHeader = req.headers.authorization;
 
-    const { installToken } = req.body;
-
-    if (!installToken) {
-      return res.status(400).json({ message: "Token is required" });
+    if (!authHeader) {
+      return res.status(401).json({ message: "No token" });
     }
 
-    connection = await pool.getConnection();
+    const token = authHeader.startsWith("Bearer ")
+      ? authHeader.split(" ")[1]
+      : null;
 
-    const [rows]: any = await connection.query(
-      `SELECT * FROM wallet_sessions 
-       WHERE install_token = ? 
-       LIMIT 1`,
-      [installToken]
-    );
-
-    if (rows.length === 0) {
-      return res.status(401).json({ message: "Invalid token" });
+    if (!token) {
+      return res.status(401).json({ message: "Invalid token format" });
     }
 
-    const session = rows[0];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!);
 
-    // Check verified
-    if (!session.is_verified) {
-      return res.status(403).json({ message: "Not verified" });
-    }
+    req.user = decoded;
 
-    // Check already used
-    if (session.token_is_used) {
-      return res.status(401).json({ message: "Token already used" });
-    }
+    return res.json({ success: true });
 
-    //  Check expiry (TIMESTAMP → convert to JS Date)
-    const expiryTime = new Date(session.token_expires_at).getTime();
-
-    if (Date.now() > expiryTime) {
-      return res.status(401).json({ message: "Token expired" });
-    }
-
-    // Mark token as used (IMPORTANT)
-    await connection.query(
-      `UPDATE wallet_sessions 
-       SET token_is_used = TRUE 
-       WHERE session_id = ?`,
-      [session.session_id]
-    );
-
-    return res.json({
-      success: true,
-      message: "Token is valid",
-      wallet: session.address,
-    });
-
-  } catch (error) {
-    console.error(" Validate token error:", error);
-    return res.status(500).json({ message: "Internal server error" });
-  } finally {
-    if (connection) connection.release();
+  } catch (err) {
+    return res.status(403).json({ message: "Invalid or expired token" });
   }
 };
+
+
+// export const verifyWallet = async (req: Request, res: Response) => {
+//   try {
+//     const { address, sessionId, signature } = req.body;
+
+//     console.log("VERIFY CALLED:", sessionId);
+
+//     if (!sessionId || !signature || !address) {
+//       return res.status(400).json({
+//         message: "sessionId, signature and address are required",
+//       });
+//     }
+//     const connection = await pool.getConnection();
+//     await connection.query(
+//       `UPDATE wallet_sessions SET signature = ? WHERE session_id = ?`,
+//       [signature, sessionId]
+//     );
+
+//     //  Fetch session from DB
+//     const [rows]: any = await connection.query(
+//       `SELECT * FROM wallet_sessions WHERE session_id = ?`,
+//       [sessionId]
+//     );
+
+//     if (rows.length === 0) {
+//       connection.release();
+//       return res.status(400).json({ message: "Invalid session" });
+//     }
+
+//     const session = rows[0];
+
+//     //  Check already used
+//     if (session.is_verified) {
+//       connection.release();
+//       return res.status(400).json({ message: "Session already verified" });
+//     }
+
+//     // Expiry check (5 min)
+//     const now = Date.now();
+//     const sessionTime = session.timestamp;
+
+//     if (now - sessionTime > 5 * 60 * 1000) {
+//       connection.release();
+//       return res.status(400).json({ message: "Session expired" });
+//     }
+
+//     //Reconstruct message (DO NOT trust frontend)
+//     const message = `Welcome to RigWorkZ Wallet: ${session.address} Nonce: ${session.nonce} Timestamp: ${session.timestamp}`;
+
+//     console.log(" Message used:", message);
+
+//     //  Verify signature
+//     const recoveredAddress = ethers.verifyMessage(message, signature);
+
+//     if (recoveredAddress.toLowerCase() !== session.address.toLowerCase()) {
+//       connection.release();
+//       return res.status(400).json({ message: "Invalid signature" });
+//     }
+
+//     // Generate install token
+//     const installToken = crypto.randomBytes(32).toString("hex");
+//     const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min
+
+//     // Update DB
+//     await connection.query(
+//       `UPDATE wallet_sessions
+//        SET is_verified = true, install_token = ?, token_expires_at = ?
+//        WHERE session_id = ?`,
+//       [installToken, expiresAt, sessionId]
+//     );
+
+//     connection.release();
+
+//     //  Return response
+//     return res.json({
+//       success: true,
+//       wallet: recoveredAddress,
+//       installToken,
+//     });
+
+//   } catch (error) {
+//     console.error(" Verify error:", error);
+//     return res.status(500).json({ message: "Internal server error" });
+//   }
+// };
+
+// export const validateInstallToken = async (req: Request, res: Response) => {
+//   let connection;
+//   try {
+//     console.log(" Validate Token API HIT");
+
+//     const { installToken } = req.body;
+
+//     if (!installToken) {
+//       return res.status(400).json({ message: "Token is required" });
+//     }
+
+//     connection = await pool.getConnection();
+
+//     const [rows]: any = await connection.query(
+//       `SELECT * FROM wallet_sessions
+//        WHERE install_token = ?
+//        LIMIT 1`,
+//       [installToken]
+//     );
+
+//     if (rows.length === 0) {
+//       return res.status(401).json({ message: "Invalid token" });
+//     }
+
+//     const session = rows[0];
+
+//     // Check verified
+//     if (!session.is_verified) {
+//       return res.status(403).json({ message: "Not verified" });
+//     }
+
+//     // Check already used
+//     if (session.token_is_used) {
+//       return res.status(401).json({ message: "Token already used" });
+//     }
+
+//     //  Check expiry (TIMESTAMP → convert to JS Date)
+//     const expiryTime = new Date(session.token_expires_at).getTime();
+
+//     if (Date.now() > expiryTime) {
+//       return res.status(401).json({ message: "Token expired" });
+//     }
+
+//     // Mark token as used (IMPORTANT)
+//     await connection.query(
+//       `UPDATE wallet_sessions
+//        SET token_is_used = TRUE
+//        WHERE session_id = ?`,
+//       [session.session_id]
+//     );
+
+//     return res.json({
+//       success: true,
+//       message: "Token is valid",
+//       wallet: session.address,
+//     });
+
+//   } catch (error) {
+//     console.error(" Validate token error:", error);
+//     return res.status(500).json({ message: "Internal server error" });
+//   } finally {
+//     if (connection) connection.release();
+//   }
+// };
 
