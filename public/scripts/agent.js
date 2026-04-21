@@ -21,7 +21,7 @@ let lastHeartbeatAt = null;
 let rigStatus = "OFFLINE";
 
 // ─── Telemetry Hash Storage ──────────────────────────────
-let storedTelemetryHash = null;
+// let storedTelemetryHash = null;
 
 // ─── Logger ─────────────────────────────────────────────
 function log(level, msg) {
@@ -35,10 +35,10 @@ function loadConfig() {
 }
 
 // ─── Hash Telemetry ─────────────────────────────────────
-function hashTelemetry(telemetry) {
-  const json = JSON.stringify(telemetry);
-  return crypto.createHash("sha256").update(json, "utf8").digest("hex");
-}
+// function hashTelemetry(telemetry) {
+//   const json = JSON.stringify(telemetry);
+//   return crypto.createHash("sha256").update(json, "utf8").digest("hex");
+// }
 
 // ─── Verify Installation ────────────────────────────────
 async function verifyWallet() {
@@ -122,7 +122,7 @@ async function sendToBackend(heartbeat) {
         pool: decoded.pool || "unknown",
         operator_wallet: global.operatorWallet || "unknown",
         worker_id: decoded.worker_id || "worker-1",
-        fingerprint: storedTelemetryHash,
+        // fingerprint: storedTelemetryHash,
         created_at: Date.now(),
       },
 
@@ -237,14 +237,14 @@ async function poll() {
       metrics,
     };
 
-    storedTelemetryHash = hashTelemetry(heartbeat);
+    // storedTelemetryHash = hashTelemetry(heartbeat);
 
     log(
       "INFO",
       `MOCK POLL | ${metrics.hashrate_ths.toFixed(2)} TH/s | claimable=${isClaimable}`,
     );
 
-    log("INFO", `Telemetry hash stored: ${storedTelemetryHash}`);
+    // log("INFO", `Telemetry hash stored: ${storedTelemetryHash}`);
 
     console.log(JSON.stringify(heartbeat, null, 2));
 

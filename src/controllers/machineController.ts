@@ -142,11 +142,10 @@
 //     }
 // };
 
-
-import { Request, Response } from 'express';
-import { pool } from '../config/database';
-import { RowDataPacket } from 'mysql2';
-import { buildUpsertQuery } from '../utils/queryBuilder';
+import { Request, Response } from "express";
+import { pool } from "../config/database";
+import { RowDataPacket } from "mysql2";
+import { buildUpsertQuery } from "../utils/queryBuilder";
 
 /* ================= INTERFACES ================= */
 
@@ -189,34 +188,41 @@ interface OnboardPayload {
 export const onboardMachine = async (req: Request, res: Response) => {
     const connection = await pool.getConnection();
 
-
     try {
         const data: OnboardPayload = req.body;
         const machine = data.machine;
-        const status = data.status;
-        const telemetry = data.telemetry;
+        const status = {
+            ...data.status,
+            operator_wallet: machine.operator_wallet,
+        };
+        const telemetry = {
+            ...data.telemetry,
+            operator_wallet: machine.operator_wallet,
+        };
 
         console.log("FULL BODY:", req.body);
         if (!machine || !status || !telemetry) {
-            return res.status(400).json({ message: 'Invalid payload structure' });
+            return res.status(400).json({ message: "Invalid payload structure" });
         }
         if (!data.machine?.machine_id || !data.machine?.operator_wallet) {
-            return res.status(400).json({ message: 'machine_id and operator_wallet are required' });
+            return res
+                .status(400)
+                .json({ message: "machine_id and operator_wallet are required" });
         }
 
         await connection.beginTransaction();
 
         /* ===== 1. MACHINES TABLE ===== */
         const { query: machineQuery, values: machineValues } = buildUpsertQuery(
-            'machines',
-            machine
+            "machines",
+            machine,
         );
         await connection.execute(machineQuery, machineValues);
 
         /* ===== 2. MACHINE STATUS ===== */
         const { query: statusQuery, values: statusValues } = buildUpsertQuery(
-            'machine_status',
-            status
+            "machine_status",
+            status,
         );
         await connection.execute(statusQuery, statusValues);
 
@@ -234,7 +240,7 @@ export const onboardMachine = async (req: Request, res: Response) => {
             telemetry.temperature,
             telemetry.uptime,
             telemetry.watt,
-            telemetry.timestamp
+            telemetry.timestamp,
         ];
 
         await connection.execute(telemetryQuery, telemetryValues);
@@ -242,14 +248,13 @@ export const onboardMachine = async (req: Request, res: Response) => {
         await connection.commit();
 
         res.status(200).json({
-            message: 'Machine onboarded successfully',
-            machine_id: data.machine.machine_id
+            message: "Machine onboarded successfully",
+            machine_id: data.machine.machine_id,
         });
-
     } catch (error) {
         await connection.rollback();
-        console.error('Error onboarding machine:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        console.error("Error onboarding machine:", error);
+        res.status(500).json({ message: "Internal server error" });
     } finally {
         connection.release();
     }
@@ -307,17 +312,16 @@ export const getMachine = async (req: Request, res: Response) => {
         LEFT JOIN machine_status s 
         ON m.operator_wallet = s.operator_wallet
         WHERE m.machine_id = ?`,
-            [machine_id]
+            [machine_id],
         );
         if (rows.length === 0) {
-            return res.status(404).json({ message: 'Machine not found' });
+            return res.status(404).json({ message: "Machine not found" });
         }
 
         res.json(rows[0]);
-
     } catch (error) {
-        console.error('Error fetching machine:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        console.error("Error fetching machine:", error);
+        res.status(500).json({ message: "Internal server error" });
     } finally {
         if (connection) connection.release();
     }
@@ -332,19 +336,18 @@ export const getMachineStatus = async (req: Request, res: Response) => {
         connection = await pool.getConnection();
 
         const [rows] = await connection.execute<RowDataPacket[]>(
-            'SELECT * FROM machine_status WHERE machine_id = ?',
-            [machine_id]
+            "SELECT * FROM machine_status WHERE machine_id = ?",
+            [machine_id],
         );
         if (rows.length === 0) {
-            return res.status(404).json({ message: 'Status not found' });
+            return res.status(404).json({ message: "Status not found" });
         }
         res.json(rows[0]);
-
     } catch (error) {
-        console.error('Error fetching status:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        console.error("Error fetching status:", error);
+        res.status(500).json({ message: "Internal server error" });
     } finally {
-        if (connection) connection.release(); // 
+        if (connection) connection.release(); //
     }
 };
 
@@ -360,16 +363,15 @@ export const getMachineTelemetry = async (req: Request, res: Response) => {
              WHERE machine_id = ? 
              ORDER BY timestamp DESC 
              LIMIT 50`,
-            [machine_id]
+            [machine_id],
         );
 
         connection.release();
 
         res.json(rows);
-
     } catch (error) {
-        console.error('Error fetching telemetry:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        console.error("Error fetching telemetry:", error);
+        res.status(500).json({ message: "Internal server error" });
     }
 };
 
@@ -413,7 +415,6 @@ export const getAllMachines = async (req: Request, res: Response) => {
     `);
 
         res.json(rows);
-
     } catch (error) {
         console.error("Error fetching machines:", error);
         res.status(500).json({ message: "Internal server error" });
@@ -430,7 +431,7 @@ export const getMachineIdByWallet = async (req: Request, res: Response) => {
 
         const [rows]: any = await connection.execute(
             `SELECT machine_id FROM machines WHERE operator_wallet = ?`,
-            [address]
+            [address],
         );
 
         connection.release();
@@ -438,15 +439,15 @@ export const getMachineIdByWallet = async (req: Request, res: Response) => {
         if (rows.length === 0) {
             return res.status(404).json({ message: "Machine not found" });
         }
-
         return res.json({
-            machine_id: rows[0].machine_id
+            machine_id: rows[0].machine_id,
         });
 
     } catch (error) {
         console.error(error);
         return res.status(500).json({ message: "Server error" });
     }
+
 };
 
 
@@ -525,3 +526,4 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
         if (connection) connection.release();
     }
 };
+
