@@ -3,7 +3,7 @@ import { getHealth } from '../controllers/healthController';
 import { login, getNonce } from '../controllers/authController';
 import { authenticateToken } from '../middleware/auth';
 import { verifyWallet, validateInstallToken } from '../controllers/authController';
-import { onboardMachine, getMachine, getAllMachines, getMachineStatus, getMachineTelemetry, getMachineIdByWallet } from '../controllers/machineController';
+import { onboardMachine, getMachine, getAllMachines, getMachineStatus, getMachineTelemetry, getMachineIdByWallet, generateAndSaveFingerprint } from '../controllers/machineController';
 
 
 
@@ -38,12 +38,12 @@ router.get('/health', getHealth);
  *       200:
  *         description: Returns JWT token
  */
-router.post('/auth/login', login);
+//router.post('/auth/login', login);
 router.get('/auth/nonce', getNonce);
 router.post('/auth/verify', verifyWallet);
 router.post('/validate-token', validateInstallToken);
 router.get("/machine-id/:address", getMachineIdByWallet);
-
+router.post("/generate-hash", authenticateToken, generateAndSaveFingerprint);
 
 // Example protected route
 /**

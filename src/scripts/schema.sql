@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS machine_telemetry (
     FOREIGN KEY (operator_wallet) REFERENCES machines(operator_wallet),
     INDEX (machine_id, timestamp)
 );
+
 CREATE TABLE wallet_sessions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     address VARCHAR(100) NOT NULL,

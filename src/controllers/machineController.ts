@@ -448,3 +448,80 @@ export const getMachineIdByWallet = async (req: Request, res: Response) => {
         return res.status(500).json({ message: "Server error" });
     }
 };
+
+
+export const generateAndSaveFingerprint = async (req: Request, res: Response) => {
+    let connection;
+
+    try {
+        const { address, signature } = req.body;
+
+        if (!address || !signature) {
+            return res.status(400).json({ message: "Missing required fields" });
+        }
+
+        connection = await pool.getConnection();
+
+        // 1. Get machine_id using address
+        const [machineRows]: any = await connection.execute(
+            `SELECT machine_id, fingerprint FROM machines WHERE operator_wallet = ?`,
+            [address]
+        );
+
+        if (machineRows.length === 0) {
+            return res.status(404).json({ message: "Machine not found" });
+        }
+
+        const machine = machineRows[0];
+
+        if (machine.fingerprint) {
+            return res.status(400).json({
+                message: "Machine is already registered"
+            });
+        }
+        const machineId = machine.machine_id;
+
+        //  2. Fetch latest telemetry
+        const [telemetryRows]: any = await connection.execute(
+            `SELECT * FROM machine_telemetry 
+             WHERE machine_id = ? 
+             ORDER BY timestamp DESC 
+             LIMIT 1`,
+            [machineId]
+        );
+
+        if (telemetryRows.length === 0) {
+            return res.status(404).json({ message: "Telemetry not found" });
+        }
+
+        const telemetry = telemetryRows[0];
+
+        //  3. Create payload
+        const payload = {
+            telemetry,
+            address,
+            signature
+        };
+
+        //  4. Generate hash
+        const crypto = require("crypto");
+        const fingerprint = crypto
+            .createHash("sha256")
+            .update(JSON.stringify(payload), "utf8")
+            .digest("hex");
+
+        //  5. Update machines table
+        await connection.execute(
+            `UPDATE machines SET fingerprint = ? WHERE operator_wallet = ?`,
+            [fingerprint, address]
+        );
+
+        return res.json({ fingerprint, machineId });
+
+    } catch (error) {
+        console.error("Error generating fingerprint:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    } finally {
+        if (connection) connection.release();
+    }
+};
