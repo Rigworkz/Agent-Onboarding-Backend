@@ -44,28 +44,21 @@ export const login = (req: Request, res: Response) => {
 export const getNonce = async (req: Request, res: Response) => {
   try {
     const { address } = req.query;
-
     if (!address || typeof address !== 'string') {
       return res.status(400).json({ message: 'Address is required' });
     }
-
     const normalizedAddress = address.toLowerCase();
     const nonce = crypto.randomBytes(16).toString('hex');
     const sessionId = uuidv4();
     const timestamp = Date.now();
-
-
     const connection = await pool.getConnection();
-
     // Remove any old unused sessions for this address
     await connection.query(
       'DELETE FROM wallet_sessions WHERE address = ? AND is_verified = false',
       [normalizedAddress]
     );
-
     // Insert new session into the database
     try {
-
       const [result]: any = await connection.query(
         `INSERT INTO wallet_sessions 
         (address, session_id, nonce, timestamp, is_verified) 
@@ -76,12 +69,9 @@ export const getNonce = async (req: Request, res: Response) => {
     } catch (err) {
       console.error("Insert failed", err);
     }
-
     connection.release();
-
     // Return nonce and session ID to frontend
     return res.json({ nonce, sessionId, timestamp });
-
   } catch (error) {
     console.error('Nonce error:', error);
     return res.status(500).json({ message: 'Internal server error' });
@@ -92,47 +82,53 @@ export const getNonce = async (req: Request, res: Response) => {
 export const verifyWallet = async (req: Request, res: Response) => {
   try {
     const { address, sessionId, signature } = req.body;
-
     // 1. Fetch session from DB
     const [rows]: any = await pool.query(
       `SELECT * FROM wallet_sessions WHERE session_id = ? AND address = ?`,
       [sessionId, address]
     );
-
     if (rows.length === 0) {
       return res.status(400).json({ message: "Invalid session" });
     }
-
     const session = rows[0];
-
     // 2. Recreate message
     const message = `Welcome to RigWorkZ Wallet: ${address} Nonce: ${session.nonce} Timestamp: ${session.timestamp}`;
 
-    // 3. Verify signature (you already have logic or use ethers)
+    // 3. Verify signature 
     const recoveredAddress = ethers.verifyMessage(message, signature);
-
     if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
       return res.status(400).json({ message: "Invalid signature" });
     }
-
     // 4. Mark session verified
     await pool.query(
       `UPDATE wallet_sessions SET is_verified = true WHERE session_id = ?`,
       [sessionId]
     );
-
     //  5. GENERATE JWT HERE
     const secret = process.env.JWT_SECRET || "your_jwt_secret";
+
+    const installToken = crypto.randomBytes(32).toString("hex");
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min expiry
+    await pool.query(
+      `UPDATE wallet_sessions 
+      SET is_verified = true,
+          install_token = ?,
+          token_expires_at = ?,
+          signature = ?
+      WHERE session_id = ?`,
+      [installToken, expiresAt, signature, sessionId]
+    );
+
 
     const token = jwt.sign(
       { operator_wallet: address },
       secret,
       { expiresIn: "1h" }
     );
-
     return res.json({
       success: true,
-      token
+      token,
+      installToken
     });
 
   } catch (error) {
@@ -142,30 +138,42 @@ export const verifyWallet = async (req: Request, res: Response) => {
 };
 
 
-export const validateInstallToken = (req: any, res: any) => {
+export const validateInstallToken = async (req: Request, res: Response) => {
   try {
     const authHeader = req.headers.authorization;
-
     if (!authHeader) {
-      return res.status(401).json({ message: "No token" });
+      return res.status(401).json({ message: "No token provided" });
     }
+    const token = authHeader.split(" ")[1];
+    const { address } = req.body; // or req.query / req.headers
 
-    const token = authHeader.startsWith("Bearer ")
-      ? authHeader.split(" ")[1]
-      : null;
-
-    if (!token) {
-      return res.status(401).json({ message: "Invalid token format" });
+    if (!address) {
+      return res.status(400).json({ message: "Address is required" });
     }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!);
-
-    req.user = decoded;
+    const [rows]: any = await pool.query(
+      `SELECT * FROM wallet_sessions 
+       WHERE install_token = ? 
+       AND address = ?
+       AND token_is_used = false 
+       AND token_expires_at > ?`,
+      [token, address.toLowerCase(), Date.now()]
+    );
+    if (rows.length === 0) {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+    // mark as used (one-time)
+    await pool.query(
+      `UPDATE wallet_sessions 
+       SET token_is_used = true 
+       WHERE install_token = ?`,
+      [token]
+    );
 
     return res.json({ success: true });
 
-  } catch (err) {
-    return res.status(403).json({ message: "Invalid or expired token" });
+  } catch (error) {
+    console.error("Token validation error:", error);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
