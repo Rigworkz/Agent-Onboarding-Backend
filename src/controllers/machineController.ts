@@ -460,7 +460,6 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
         if (!address || !signature) {
             return res.status(400).json({ message: "Missing required fields" });
         }
-
         connection = await pool.getConnection();
 
         // 1. Get machine_id using address
@@ -468,11 +467,9 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
             `SELECT machine_id, fingerprint FROM machines WHERE operator_wallet = ?`,
             [address]
         );
-
         if (machineRows.length === 0) {
             return res.status(404).json({ message: "Machine not found" });
         }
-
         const machine = machineRows[0];
 
         if (machine.fingerprint) {
@@ -481,7 +478,6 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
             });
         }
         const machineId = machine.machine_id;
-
         //  2. Fetch latest telemetry
         const [telemetryRows]: any = await connection.execute(
             `SELECT * FROM machine_telemetry 
@@ -490,27 +486,22 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
              LIMIT 1`,
             [machineId]
         );
-
         if (telemetryRows.length === 0) {
             return res.status(404).json({ message: "Telemetry not found" });
         }
-
         const telemetry = telemetryRows[0];
-
         //  3. Create payload
         const payload = {
             telemetry,
             address,
             signature
         };
-
         //  4. Generate hash
         const crypto = require("crypto");
         const fingerprint = crypto
             .createHash("sha256")
             .update(JSON.stringify(payload), "utf8")
             .digest("hex");
-
         //  5. Update machines table
         await connection.execute(
             `UPDATE machines SET fingerprint = ? WHERE operator_wallet = ?`,
