@@ -186,6 +186,10 @@ async function poll() {
   try {
     const raw = fs.readFileSync(MOCK_FILE, "utf8");
     const data = JSON.parse(raw);
+    const config = loadConfig();
+    const minerHost = config.miner_ip || "mock";
+    const minerPort = config.miner_port || null;
+    const discoveryStatus = config.discovery?.status || "unknown";
 
     const stats = data.STATS[0];
 
@@ -228,8 +232,10 @@ async function poll() {
     const heartbeat = {
       batch_id: crypto.randomUUID(),
       timestamp_ms: now,
-      miner_host: "mock",
+      miner_host: minerHost,
+      miner_port: minerPort,
       miner_type: data.INFO?.type ?? "mock",
+      discovery_status: discoveryStatus,
       status: rigStatus,
       claimable: isClaimable,
       verification_done: verificationDone,
