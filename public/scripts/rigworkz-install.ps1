@@ -55,7 +55,7 @@ function Get-SubnetHosts {
     $maskInt = ConvertTo-UInt32Ip -Ip $Mask
 
     $network = $ipInt -band $maskInt
-    $wildcard = [uint32]([uint64]0xFFFFFFFF -bxor [uint64]$maskInt)
+    $wildcard = [uint32]([uint32]0xFFFFFFFF -bxor $maskInt)
     $broadcast = $network -bor $wildcard
 
     $start = [uint32]($network + 1)
@@ -168,7 +168,8 @@ function Discover-Miner {
     Write-Host "Scanning subnet from adapter $($cfg.InterfaceAlias): $ip/$mask"
 
     for ($offset = 0; $offset -lt $hosts.Count; $offset += $BatchSize) {
-        $batch = $hosts[$offset..([Math]::Min($offset + $BatchSize - 1, $hosts.Count - 1))]
+        $end = [Math]::Min($offset + $BatchSize - 1, $hosts.Count - 1)
+        $batch = $hosts[$offset..$end]
         $aliveHosts = Invoke-ParallelPingBatch -Ips $batch
 
         foreach ($aliveIp in $aliveHosts) {
