@@ -137,11 +137,11 @@ function Discover-Miner {
 
     $hosts = Get-SubnetHosts -Ip $ip -PrefixLength $prefix
 
-    foreach ($host in $hosts) {
-        if (Test-HostAlive $host) {
-            Write-Host "Alive: $host"
+    foreach ($ipAddr in $hosts) {
+        if (Test-HostAlive $ipAddr) {
+            Write-Host "Alive: $ipAddr"
 
-            $miner = Test-MinerEndpoint $host
+            $miner = Test-MinerEndpoint $ipAddr
             if ($miner) {
                 Write-Host "Miner found: $($miner.miner_ip):$($miner.miner_port)"
                 return $miner
