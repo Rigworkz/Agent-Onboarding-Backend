@@ -8,8 +8,7 @@ param(
     [string]$MinerPass = "root",
     [int]$PingTimeoutMs = 250,
     [int]$EndpointTimeoutSec = 1,
-    [int]$ScanThrottle = 64,
-    [int]$ProgressIntervalSec = 5
+    [int]$BatchSize = 64
 )
 
 if (-not $Payload) {
@@ -18,12 +17,8 @@ if (-not $Payload) {
 }
 
 function Write-Log {
-    param(
-        [string]$Level,
-        [string]$Message
-    )
-    $line = "[{0}] [{1}] {2}" -f (Get-Date).ToString("o"), $Level, $Message
-    Write-Host $line
+    param([string]$Level, [string]$Message)
+    Write-Host ("[{0}] [{1}] {2}" -f (Get-Date).ToString("o"), $Level, $Message)
 }
 
 function Get-PrimaryIPv4Config {
@@ -111,103 +106,39 @@ function Get-SubnetHosts {
     return $hosts
 }
 
-function Invoke-ParallelPingScan {
+function Test-HostAliveBatch {
     param(
         [string[]]$Ips,
-        [int]$Throttle = 64,
         [int]$TimeoutMs = 250,
-        [int]$ProgressIntervalSec = 5
+        [int]$BatchSize = 64
     )
 
-    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-
-    $pool = [runspacefactory]::CreateRunspacePool(1, $Throttle)
-    $pool.Open()
-
-    $queue = New-Object System.Collections.Generic.Queue[string]
-    foreach ($ip in $Ips) {
-        $queue.Enqueue($ip)
-    }
-
-    $pending = New-Object System.Collections.ArrayList
     $alive = New-Object System.Collections.Generic.List[string]
-    $checked = 0
-    $lastProgress = [datetime]::UtcNow
 
-    try {
-        while ($queue.Count -gt 0 -or $pending.Count -gt 0) {
-            while ($queue.Count -gt 0 -and $pending.Count -lt $Throttle) {
-                $ip = $queue.Dequeue()
+    for ($offset = 0; $offset -lt $Ips.Count; $offset += $BatchSize) {
+        $end = [Math]::Min($offset + $BatchSize - 1, $Ips.Count - 1)
+        $batch = $Ips[$offset..$end]
 
-                $ps = [powershell]::Create()
-                $ps.RunspacePool = $pool
-                [void]$ps.AddScript(@'
-param($TargetIp, $TimeoutMs)
-
-$ping = [System.Net.NetworkInformation.Ping]::new()
-try {
-    $reply = $ping.Send($TargetIp, $TimeoutMs)
-    if ($reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
-        $TargetIp
-    }
-}
-catch {
-}
-finally {
-    $ping.Dispose()
-}
-'@).AddArgument($ip).AddArgument($TimeoutMs)
-
-                $handle = $ps.BeginInvoke()
-                [void]$pending.Add([pscustomobject]@{
-                    PS = $ps
-                    Handle = $handle
-                    Ip = $ip
-                })
-            }
-
-            for ($i = $pending.Count - 1; $i -ge 0; $i--) {
-                $item = $pending[$i]
-                if ($item.Handle.IsCompleted) {
-                    try {
-                        $result = @($item.PS.EndInvoke($item.Handle))
-                        if ($result.Count -gt 0 -and $result[0]) {
-                            [void]$alive.Add([string]$result[0])
-                        }
-                    }
-                    catch {
-                    }
-                    finally {
-                        $item.PS.Dispose()
-                        [void]$pending.RemoveAt($i)
-                    }
-
-                    $checked++
-                    if (
-                        ([datetime]::UtcNow - $lastProgress).TotalSeconds -ge $ProgressIntervalSec -or
-                        $checked -eq $Ips.Count
-                    ) {
-                        Write-Log "INFO" ("Ping progress: {0}/{1} checked, {2} alive, elapsed {3}" -f `
-                            $checked, $Ips.Count, $alive.Count, $stopwatch.Elapsed.ToString("hh\:mm\:ss"))
-                        $lastProgress = [datetime]::UtcNow
-                    }
+        $jobs = @()
+        foreach ($ip in $batch) {
+            $jobs += Start-Job -ArgumentList $ip, $TimeoutMs -ScriptBlock {
+                param($TargetIp, $T)
+                ping.exe -n 1 -w $T $TargetIp *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    $TargetIp
                 }
             }
+        }
 
-            Start-Sleep -Milliseconds 25
+        $results = Receive-Job -Job $jobs -Wait -AutoRemoveJob
+        foreach ($item in $results) {
+            if ($item) {
+                $alive.Add($item)
+            }
         }
     }
-    finally {
-        $pool.Close()
-        $pool.Dispose()
-    }
 
-    return [pscustomobject]@{
-        AliveHosts = $alive.ToArray()
-        Checked    = $checked
-        Total      = $Ips.Count
-        ElapsedMs  = $stopwatch.ElapsedMilliseconds
-    }
+    return $alive.ToArray()
 }
 
 function Get-Md5Hex {
@@ -228,12 +159,9 @@ function Parse-AuthChallenge {
     param([string]$Header)
 
     $out = @{}
-    $re = '(\w+)=(?:"([^"]+)"|([^\s,]+))'
-
-    foreach ($m in [regex]::Matches($Header, $re)) {
+    foreach ($m in [regex]::Matches($Header, '(\w+)=(?:"([^"]+)"|([^\s,]+))')) {
         $out[$m.Groups[1].Value] = if ($m.Groups[2].Value) { $m.Groups[2].Value } else { $m.Groups[3].Value }
     }
-
     return $out
 }
 
@@ -258,65 +186,47 @@ function Build-DigestAuthHeader {
         $cnonce = ([guid]::NewGuid().ToString("N")).Substring(0, 16)
         $response = Get-Md5Hex "$ha1`:$nonce`:$nc`:$cnonce`:auth`:$ha2"
 
-        return (
-            'Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", qop=auth, nc={4}, cnonce="{5}", response="{6}"' -f `
-            $User, $realm, $nonce, $UriPath, $nc, $cnonce, $response
-        )
+        return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", qop=auth, nc={4}, cnonce="{5}", response="{6}"' -f `
+            $User, $realm, $nonce, $UriPath, $nc, $cnonce, $response)
     }
 
     $response = Get-Md5Hex "$ha1`:$nonce`:$ha2"
-
-    return (
-        'Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}"' -f `
-        $User, $realm, $nonce, $UriPath, $response
-    )
+    return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}"' -f `
+        $User, $realm, $nonce, $UriPath, $response)
 }
 
-function Invoke-MinerStatsCheck {
-    param(
-        [string]$Ip,
-        [int[]]$Ports = @(80, 8080)
-    )
+function Test-MinerEndpoint {
+    param([string]$Ip)
 
     $uriPath = "/cgi-bin/stats.cgi"
 
-    foreach ($port in $Ports) {
+    foreach ($port in @(80, 8080)) {
         $url = "http://$Ip`:$port$uriPath"
-        Write-Log "INFO" "Verifying candidate $Ip on port $port"
 
         try {
-            $probe = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-
-            if ($probe.StatusCode -eq 200) {
-                try {
-                    $json = $probe.Content | ConvertFrom-Json
-                    if ($json.INFO.type -and $json.STATS[0]) {
-                        return [pscustomobject]@{
-                            miner_ip   = $Ip
-                            miner_port = $port
-                            miner_type = $json.INFO.type
-                            auth_mode  = "open"
-                        }
+            $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
+            if ($res.StatusCode -eq 200) {
+                $json = $res.Content | ConvertFrom-Json
+                if ($json.INFO.type -and $json.STATS[0]) {
+                    return [pscustomobject]@{
+                        miner_ip   = $Ip
+                        miner_port = $port
+                        miner_type = $json.INFO.type
+                        auth_mode  = "open"
                     }
-                }
-                catch {
-                    Write-Log "WARN" "Candidate $Ip:$port returned 200 but response was not valid miner JSON"
                 }
             }
         }
         catch {
             $resp = $_.Exception.Response
-
             if ($resp -and [int]$resp.StatusCode -eq 401) {
                 $challengeHeader = $resp.Headers["WWW-Authenticate"]
-
                 if ($challengeHeader) {
                     try {
                         $challenge = Parse-AuthChallenge -Header $challengeHeader
                         $authHeader = Build-DigestAuthHeader -Method "GET" -UriPath $uriPath -Challenge $challenge -User $MinerUser -Pass $MinerPass
 
                         $authed = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $authHeader } -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-
                         if ($authed.StatusCode -eq 200) {
                             $json = $authed.Content | ConvertFrom-Json
                             if ($json.INFO.type -and $json.STATS[0]) {
@@ -330,7 +240,6 @@ function Invoke-MinerStatsCheck {
                         }
                     }
                     catch {
-                        Write-Log "INFO" "Digest verification failed for $Ip:$port"
                     }
                 }
             }
@@ -344,52 +253,29 @@ function Discover-Miner {
     $cfg = Get-PrimaryIPv4Config
     $ip = $cfg.IPv4Address.IPAddress
     $prefix = $cfg.IPv4Address.PrefixLength
-    $subnetLabel = "$ip/$prefix"
 
     Write-Log "INFO" "Adapter: $($cfg.InterfaceAlias)"
     Write-Log "INFO" "Local IP: $ip"
-    Write-Log "INFO" "Subnet: $subnetLabel"
+    Write-Log "INFO" "Subnet: $ip/$prefix"
 
     $hosts = Get-SubnetHosts -Ip $ip -PrefixLength $prefix
-    Write-Log "INFO" "Total hosts to scan: $($hosts.Count)"
-    Write-Log "INFO" "Scan mode: parallel ping + endpoint verify"
-    Write-Log "INFO" "Verifier ports: 80, 8080"
+    Write-Log "INFO" "Total hosts: $($hosts.Count)"
 
-    $scan = Invoke-ParallelPingScan -Ips $hosts -Throttle $ScanThrottle -TimeoutMs $PingTimeoutMs -ProgressIntervalSec $ProgressIntervalSec
+    $alive = Test-HostAliveBatch -Ips $hosts -TimeoutMs $PingTimeoutMs -BatchSize $BatchSize
+    Write-Log "INFO" "Alive hosts: $($alive.Count)"
 
-    Write-Log "INFO" "Ping scan complete: $($scan.Checked)/$($scan.Total) checked, $($scan.AliveHosts.Count) alive, elapsed $([TimeSpan]::FromMilliseconds($scan.ElapsedMs).ToString())"
-
-    $verifiedCount = 0
-    foreach ($candidate in $scan.AliveHosts) {
-        $verifiedCount++
-        $miner = Invoke-MinerStatsCheck -Ip $candidate -Ports @(80, 8080)
-
+    foreach ($candidate in $alive) {
+        Write-Log "INFO" "Verifying ${candidate}:80/8080"
+        $miner = Test-MinerEndpoint -Ip $candidate
         if ($miner) {
-            Write-Log "INFO" "Miner confirmed: $($miner.miner_ip):$($miner.miner_port) | type=$($miner.miner_type) | auth=$($miner.auth_mode)"
-
-            return [pscustomobject]@{
-                Found = $true
-                Miner = $miner
-                Scan = $scan
-                VerifiedCount = $verifiedCount
-                Subnet = $subnetLabel
-                Adapter = $cfg.InterfaceAlias
-            }
+            Write-Log "INFO" "Miner found: $($miner.miner_ip):$($miner.miner_port) type=$($miner.miner_type) auth=$($miner.auth_mode)"
+            return $miner
         }
 
         Write-Log "WARN" "Candidate rejected: $candidate"
     }
 
-    Write-Log "WARN" "Discovery completed with no miner found"
-
-    return [pscustomobject]@{
-        Found = $false
-        Miner = $null
-        Scan = $scan
-        VerifiedCount = $verifiedCount
-        Subnet = $subnetLabel
-        Adapter = $cfg.InterfaceAlias
-    }
+    return $null
 }
 
 try {
@@ -400,48 +286,38 @@ try {
     $machineId = [guid]::NewGuid().ToString()
 
     Write-Log "INFO" "Starting network scan..."
-    $discovery = Discover-Miner
+    $miner = Discover-Miner
 
     $config = @{
         payload    = $Payload
         backendUrl = $BackendUrl
         machine_id = $machineId
-        miner_ip   = if ($discovery.Found) { $discovery.Miner.miner_ip } else { $null }
-        miner_port = if ($discovery.Found) { $discovery.Miner.miner_port } else { $null }
+        miner_ip   = if ($miner) { $miner.miner_ip } else { $null }
+        miner_port = if ($miner) { $miner.miner_port } else { $null }
         discovery  = @{
-            method            = "parallel-ping+http-digest"
-            status            = if ($discovery.Found) { "found" } else { "not_found" }
-            adapter           = $discovery.Adapter
-            subnet            = $discovery.Subnet
-            total_hosts       = $discovery.Scan.Total
-            checked_hosts     = $discovery.Scan.Checked
-            alive_hosts       = $discovery.Scan.AliveHosts.Count
-            verified_candidates = $discovery.VerifiedCount
-            elapsed_ms        = $discovery.Scan.ElapsedMs
-            scanned_at        = (Get-Date).ToString("o")
-            miner_type        = if ($discovery.Found) { $discovery.Miner.miner_type } else { $null }
-            auth_mode         = if ($discovery.Found) { $discovery.Miner.auth_mode } else { $null }
+            method   = "batch-ping+endpoint-verify"
+            status   = if ($miner) { "found" } else { "not_found" }
+            scanned_at = (Get-Date).ToString("o")
+            miner_type = if ($miner) { $miner.miner_type } else { $null }
+            auth_mode  = if ($miner) { $miner.auth_mode } else { $null }
         }
-    } | ConvertTo-Json -Depth 6
+    } | ConvertTo-Json -Depth 5
 
     $configPath = Join-Path $InstallDir "config.json"
     Set-Content -Path $configPath -Value $config -Encoding Ascii
 
     $agentDest = Join-Path $InstallDir "agent.js"
-    Write-Host "Downloading agent from $AgentUrl ..."
     Invoke-WebRequest -Uri $AgentUrl -OutFile $agentDest
 
     $mockDest = Join-Path $InstallDir "mock-telemetry.json"
-    Write-Host "Downloading mock telemetry from $MockTelemetryUrl ..."
     Invoke-WebRequest -Uri $MockTelemetryUrl -OutFile $mockDest
 
-    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-    if (-not $nodeCmd) {
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
         Write-Host "Node.js is not installed or not available in PATH"
         exit 1
     }
 
-    Write-Host "Starting agent..."
+    Write-Log "INFO" "Starting agent..."
     Start-Process -FilePath "node" -ArgumentList "`"$agentDest`"" -WorkingDirectory $InstallDir -NoNewWindow
 }
 catch {
