@@ -314,18 +314,25 @@ function Test-MinerEndpoint {
 
         try {
             $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-            $content = $res.Content
 
             if ($res.StatusCode -eq 200) {
-                $json = $content | ConvertFrom-Json -ErrorAction Stop
-                if ($json -and $json.INFO -and $json.INFO.type -and $json.STATS -and $json.STATS.Count -gt 0) {
+                $json = $res.Content | ConvertFrom-Json -ErrorAction Stop
+
+                # ── FIXED: STATS with at least 1 entry is enough.
+                # INFO.type is optional — mock and some real miners omit it.
+                $hasStats = $json.STATS -and @($json.STATS).Count -gt 0
+                if ($hasStats) {
+                    $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } else { "unknown" }
+                    Write-Log "INFO" "Miner confirmed at ${Ip}:$port (type=$minerType)"
                     return [pscustomobject]@{
                         miner_ip   = $Ip
                         miner_port = $port
-                        miner_type = $json.INFO.type
+                        miner_type = $minerType
                         auth_mode  = "open"
                     }
                 }
+
+                Write-Log "WARN" "200 OK but no STATS in response from ${Ip}:$port"
             }
         }
         catch {
@@ -340,20 +347,27 @@ function Test-MinerEndpoint {
                         $authed = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $authHeader } -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
                         $json = $authed.Content | ConvertFrom-Json -ErrorAction Stop
 
-                        if ($authed.StatusCode -eq 200 -and $json -and $json.INFO -and $json.INFO.type -and $json.STATS -and $json.STATS.Count -gt 0) {
+                        $hasStats = $json.STATS -and @($json.STATS).Count -gt 0
+                        if ($authed.StatusCode -eq 200 -and $hasStats) {
+                            $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } else { "unknown" }
+                            Write-Log "INFO" "Miner confirmed at ${Ip}:$port via digest (type=$minerType)"
                             return [pscustomobject]@{
                                 miner_ip   = $Ip
                                 miner_port = $port
-                                miner_type = $json.INFO.type
+                                miner_type = $minerType
                                 auth_mode  = "digest"
                             }
                         }
                     }
                     catch {
+                        Write-Log "WARN" "Digest auth failed for ${Ip}:$port — $($_.Exception.Message)"
                     }
                 }
             }
+            # Any other error (connection refused, timeout) — silently skip to next port
         }
+
+        Write-Log "WARN" "No miner at ${Ip}:$port"
     }
 
     return $null
@@ -392,6 +406,7 @@ function Discover-Miner {
     Write-Log "INFO" "Trying local IP first: $ip"
     $localMiner = Test-MinerEndpoint -Ip $ip -PreferredPort 8080
     if ($localMiner) {
+        Write-Log "INFO" "Miner found on local machine: $($localMiner.miner_ip):$($localMiner.miner_port)"
         return [pscustomobject]@{
             Miner = $localMiner
             Meta = @{

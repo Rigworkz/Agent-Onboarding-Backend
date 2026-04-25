@@ -1,25 +1,24 @@
 {
+  "STATUS": [{ "STATUS": "S", "Code": 11, "Msg": "Stats", "Description": "cgminer" }],
   "INFO": {
-    "type": "mock-miner"
+    "type": "Antminer S19",
+    "miner": "cgminer",
+    "CompileTime": "Fri Oct 1 2021",
+    "Type": "Antminer S19"
   },
   "STATS": [
     {
-      "rate_avg": 12500,
-      "rate_30m": 12300,
-      "rate_5s": 12650,
+      "rate_avg": 95000,
+      "rate_5s": 94500,
+      "rate_30m": 95100,
       "elapsed": 86400,
-      "watt": 3200,
-      "fan": [65, 67, 70],
+      "watt": 3250,
+      "fan": [4200, 4300],
       "chain": [
-        {
-          "hw": 0,
-          "temp_chip": [58, 60, 61]
-        },
-        {
-          "hw": 1,
-          "temp_chip": [59, 62, 64]
-        }
+        { "temp_chip": [72, 74, 71], "hw": 0 },
+        { "temp_chip": [73, 75, 72], "hw": 0 }
       ]
     }
-  ]
+  ],
+  "id": 1
 }
