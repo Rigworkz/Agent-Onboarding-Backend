@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS machine_telemetry (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     operator_wallet VARCHAR(255),
     machine_id VARCHAR(100),
+    child_fingerprint VARCHAR(255),    --child finger_print added
     hashrate DOUBLE,
     rate_avg DOUBLE,
     temperature DOUBLE,

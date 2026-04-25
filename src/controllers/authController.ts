@@ -119,16 +119,28 @@ export const verifyWallet = async (req: Request, res: Response) => {
       [installToken, expiresAt, signature, sessionId]
     );
 
-
     const token = jwt.sign(
       { operator_wallet: address },
       secret,
       { expiresIn: "1h" }
     );
+
+    const payload = JSON.stringify({ installToken, address });
+    const secretIT = process.env.PAYLOAD_SECRET || "my_secret";
+    const combined = secretIT + payload;
+    const encodedPayload = Buffer.from(combined).toString("base64");
+
+    // const decoded = Buffer.from(encodedPayload, "base64").toString("utf8");
+    // const secret = "my_secret";
+    // const json = decoded.substring(secret.length);
+    // const data = JSON.parse(json);
+    // const installToken = data.installToken;
+    // const address = data.address;
+
     return res.json({
       success: true,
       token,
-      installToken
+      encodedPayload
     });
 
   } catch (error) {
@@ -141,7 +153,7 @@ export const verifyWallet = async (req: Request, res: Response) => {
 export const validateInstallToken = async (req: Request, res: Response) => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader) {
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return res.status(401).json({ message: "No token provided" });
     }
     const token = authHeader.split(" ")[1];
@@ -176,155 +188,3 @@ export const validateInstallToken = async (req: Request, res: Response) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
-
-
-// export const verifyWallet = async (req: Request, res: Response) => {
-//   try {
-//     const { address, sessionId, signature } = req.body;
-
-//     console.log("VERIFY CALLED:", sessionId);
-
-//     if (!sessionId || !signature || !address) {
-//       return res.status(400).json({
-//         message: "sessionId, signature and address are required",
-//       });
-//     }
-//     const connection = await pool.getConnection();
-//     await connection.query(
-//       `UPDATE wallet_sessions SET signature = ? WHERE session_id = ?`,
-//       [signature, sessionId]
-//     );
-
-//     //  Fetch session from DB
-//     const [rows]: any = await connection.query(
-//       `SELECT * FROM wallet_sessions WHERE session_id = ?`,
-//       [sessionId]
-//     );
-
-//     if (rows.length === 0) {
-//       connection.release();
-//       return res.status(400).json({ message: "Invalid session" });
-//     }
-
-//     const session = rows[0];
-
-//     //  Check already used
-//     if (session.is_verified) {
-//       connection.release();
-//       return res.status(400).json({ message: "Session already verified" });
-//     }
-
-//     // Expiry check (5 min)
-//     const now = Date.now();
-//     const sessionTime = session.timestamp;
-
-//     if (now - sessionTime > 5 * 60 * 1000) {
-//       connection.release();
-//       return res.status(400).json({ message: "Session expired" });
-//     }
-
-//     //Reconstruct message (DO NOT trust frontend)
-//     const message = `Welcome to RigWorkZ Wallet: ${session.address} Nonce: ${session.nonce} Timestamp: ${session.timestamp}`;
-
-//     console.log(" Message used:", message);
-
-//     //  Verify signature
-//     const recoveredAddress = ethers.verifyMessage(message, signature);
-
-//     if (recoveredAddress.toLowerCase() !== session.address.toLowerCase()) {
-//       connection.release();
-//       return res.status(400).json({ message: "Invalid signature" });
-//     }
-
-//     // Generate install token
-//     const installToken = crypto.randomBytes(32).toString("hex");
-//     const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min
-
-//     // Update DB
-//     await connection.query(
-//       `UPDATE wallet_sessions
-//        SET is_verified = true, install_token = ?, token_expires_at = ?
-//        WHERE session_id = ?`,
-//       [installToken, expiresAt, sessionId]
-//     );
-
-//     connection.release();
-
-//     //  Return response
-//     return res.json({
-//       success: true,
-//       wallet: recoveredAddress,
-//       installToken,
-//     });
-
-//   } catch (error) {
-//     console.error(" Verify error:", error);
-//     return res.status(500).json({ message: "Internal server error" });
-//   }
-// };
-
-// export const validateInstallToken = async (req: Request, res: Response) => {
-//   let connection;
-//   try {
-//     console.log(" Validate Token API HIT");
-
-//     const { installToken } = req.body;
-
-//     if (!installToken) {
-//       return res.status(400).json({ message: "Token is required" });
-//     }
-
-//     connection = await pool.getConnection();
-
-//     const [rows]: any = await connection.query(
-//       `SELECT * FROM wallet_sessions
-//        WHERE install_token = ?
-//        LIMIT 1`,
-//       [installToken]
-//     );
-
-//     if (rows.length === 0) {
-//       return res.status(401).json({ message: "Invalid token" });
-//     }
-
-//     const session = rows[0];
-
-//     // Check verified
-//     if (!session.is_verified) {
-//       return res.status(403).json({ message: "Not verified" });
-//     }
-
-//     // Check already used
-//     if (session.token_is_used) {
-//       return res.status(401).json({ message: "Token already used" });
-//     }
-
-//     //  Check expiry (TIMESTAMP → convert to JS Date)
-//     const expiryTime = new Date(session.token_expires_at).getTime();
-
-//     if (Date.now() > expiryTime) {
-//       return res.status(401).json({ message: "Token expired" });
-//     }
-
-//     // Mark token as used (IMPORTANT)
-//     await connection.query(
-//       `UPDATE wallet_sessions
-//        SET token_is_used = TRUE
-//        WHERE session_id = ?`,
-//       [session.session_id]
-//     );
-
-//     return res.json({
-//       success: true,
-//       message: "Token is valid",
-//       wallet: session.address,
-//     });
-
-//   } catch (error) {
-//     console.error(" Validate token error:", error);
-//     return res.status(500).json({ message: "Internal server error" });
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// };
-
