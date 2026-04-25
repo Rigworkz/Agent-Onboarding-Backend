@@ -121,6 +121,40 @@ function Get-CachedDiscovery {
     }
 }
 
+function Save-DiscoveryResult {
+    param(
+        [string]$InstallDir,
+        [string]$Payload,
+        [string]$BackendUrl,
+        [string]$MachineId,
+        [object]$Miner,
+        [object]$DiscoveryMeta
+    )
+
+    $config = @{
+        payload    = $Payload
+        backendUrl = $BackendUrl
+        machine_id = $MachineId
+        miner_ip   = if ($Miner) { $Miner.miner_ip } else { $null }
+        miner_port = if ($Miner) { $Miner.miner_port } else { $null }
+        discovery  = @{
+            method     = "parallel-ping+endpoint-verify"
+            status     = if ($Miner) { "found" } else { "not_found" }
+            scanned_at = (Get-Date).ToString("o")
+            miner_type = if ($Miner) { $Miner.miner_type } else { $null }
+            auth_mode  = if ($Miner) { $Miner.auth_mode } else { $null }
+            adapter    = $DiscoveryMeta.adapter
+            subnet     = $DiscoveryMeta.subnet
+            total_hosts = $DiscoveryMeta.total_hosts
+            checked_hosts = $DiscoveryMeta.checked_hosts
+            alive_hosts = $DiscoveryMeta.alive_hosts
+        }
+    } | ConvertTo-Json -Depth 5
+
+    $configPath = Join-Path $InstallDir "config.json"
+    Set-Content -Path $configPath -Value $config -Encoding Ascii
+}
+
 function Invoke-ParallelPingScan {
     param(
         [string[]]$Ips,
@@ -276,16 +310,21 @@ function Test-MinerEndpoint {
 
     foreach ($port in $ports) {
         $url = "http://$Ip`:$port$uriPath"
+        Write-Log "INFO" "Checking ${Ip}:$port"
 
         try {
-            $json = Invoke-RestMethod -Uri $url -TimeoutSec $EndpointTimeoutSec -Method Get -ErrorAction Stop
+            $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
+            $content = $res.Content
 
-            if ($json -and $json.INFO -and $json.INFO.type -and $json.STATS -and $json.STATS.Count -gt 0) {
-                return [pscustomobject]@{
-                    miner_ip   = $Ip
-                    miner_port = $port
-                    miner_type = $json.INFO.type
-                    auth_mode  = "open"
+            if ($res.StatusCode -eq 200) {
+                $json = $content | ConvertFrom-Json -ErrorAction Stop
+                if ($json -and $json.INFO -and $json.INFO.type -and $json.STATS -and $json.STATS.Count -gt 0) {
+                    return [pscustomobject]@{
+                        miner_ip   = $Ip
+                        miner_port = $port
+                        miner_type = $json.INFO.type
+                        auth_mode  = "open"
+                    }
                 }
             }
         }
@@ -298,9 +337,10 @@ function Test-MinerEndpoint {
                         $challenge = Parse-AuthChallenge -Header $challengeHeader
                         $authHeader = Build-DigestAuthHeader -Method "GET" -UriPath $uriPath -Challenge $challenge -User $MinerUser -Pass $MinerPass
 
-                        $json = Invoke-RestMethod -Uri $url -Headers @{ Authorization = $authHeader } -TimeoutSec $EndpointTimeoutSec -Method Get -ErrorAction Stop
+                        $authed = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $authHeader } -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
+                        $json = $authed.Content | ConvertFrom-Json -ErrorAction Stop
 
-                        if ($json -and $json.INFO -and $json.INFO.type -and $json.STATS -and $json.STATS.Count -gt 0) {
+                        if ($authed.StatusCode -eq 200 -and $json -and $json.INFO -and $json.INFO.type -and $json.STATS -and $json.STATS.Count -gt 0) {
                             return [pscustomobject]@{
                                 miner_ip   = $Ip
                                 miner_port = $port
@@ -336,16 +376,32 @@ function Discover-Miner {
         Write-Log "INFO" "Trying cached miner first: $($cached.miner_ip):$($cached.miner_port)"
         $cachedMiner = Test-MinerEndpoint -Ip $cached.miner_ip -PreferredPort ([int]($cached.miner_port))
         if ($cachedMiner) {
-            Write-Log "INFO" "Miner found: $($cachedMiner.miner_ip):$($cachedMiner.miner_port) type=$($cachedMiner.miner_type) auth=$($cachedMiner.auth_mode)"
-            return $cachedMiner
+            return [pscustomobject]@{
+                Miner = $cachedMiner
+                Meta = @{
+                    adapter = $cfg.InterfaceAlias
+                    subnet = "$ip/$prefix"
+                    total_hosts = 0
+                    checked_hosts = 0
+                    alive_hosts = 0
+                }
+            }
         }
     }
 
     Write-Log "INFO" "Trying local IP first: $ip"
     $localMiner = Test-MinerEndpoint -Ip $ip -PreferredPort 8080
     if ($localMiner) {
-        Write-Log "INFO" "Miner found: $($localMiner.miner_ip):$($localMiner.miner_port) type=$($localMiner.miner_type) auth=$($localMiner.auth_mode)"
-        return $localMiner
+        return [pscustomobject]@{
+            Miner = $localMiner
+            Meta = @{
+                adapter = $cfg.InterfaceAlias
+                subnet = "$ip/$prefix"
+                total_hosts = 0
+                checked_hosts = 0
+                alive_hosts = 0
+            }
+        }
     }
 
     $hosts = Get-SubnetHosts -Ip $ip -PrefixLength $prefix
@@ -364,14 +420,31 @@ function Discover-Miner {
         Write-Log "INFO" "Verifying ${candidate}:80/8080"
         $miner = Test-MinerEndpoint -Ip $candidate
         if ($miner) {
-            Write-Log "INFO" "Miner found: $($miner.miner_ip):$($miner.miner_port) type=$($miner.miner_type) auth=$($miner.auth_mode)"
-            return $miner
+            return [pscustomobject]@{
+                Miner = $miner
+                Meta = @{
+                    adapter = $cfg.InterfaceAlias
+                    subnet = "$ip/$prefix"
+                    total_hosts = $scan.Total
+                    checked_hosts = $scan.Checked
+                    alive_hosts = $scan.AliveHosts.Count
+                }
+            }
         }
 
         Write-Log "WARN" "Candidate rejected: $candidate"
     }
 
-    return $null
+    return [pscustomobject]@{
+        Miner = $null
+        Meta = @{
+            adapter = $cfg.InterfaceAlias
+            subnet = "$ip/$prefix"
+            total_hosts = $scan.Total
+            checked_hosts = $scan.Checked
+            alive_hosts = $scan.AliveHosts.Count
+        }
+    }
 }
 
 try {
@@ -382,25 +455,10 @@ try {
     $machineId = [guid]::NewGuid().ToString()
 
     Write-Log "INFO" "Starting network scan..."
-    $miner = Discover-Miner -InstallDir $InstallDir
+    $result = Discover-Miner -InstallDir $InstallDir
+    $miner = $result.Miner
 
-    $config = @{
-        payload    = $Payload
-        backendUrl = $BackendUrl
-        machine_id = $machineId
-        miner_ip   = if ($miner) { $miner.miner_ip } else { $null }
-        miner_port = if ($miner) { $miner.miner_port } else { $null }
-        discovery  = @{
-            method     = "parallel-ping+endpoint-verify"
-            status     = if ($miner) { "found" } else { "not_found" }
-            scanned_at = (Get-Date).ToString("o")
-            miner_type = if ($miner) { $miner.miner_type } else { $null }
-            auth_mode  = if ($miner) { $miner.auth_mode } else { $null }
-        }
-    } | ConvertTo-Json -Depth 5
-
-    $configPath = Join-Path $InstallDir "config.json"
-    Set-Content -Path $configPath -Value $config -Encoding Ascii
+    Save-DiscoveryResult -InstallDir $InstallDir -Payload $Payload -BackendUrl $BackendUrl -MachineId $machineId -Miner $miner -DiscoveryMeta $result.Meta
 
     $agentDest = Join-Path $InstallDir "agent.js"
     Invoke-WebRequest -Uri $AgentUrl -OutFile $agentDest
