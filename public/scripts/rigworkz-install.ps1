@@ -8,7 +8,7 @@ param(
     [string]$MinerPass = "root",
     [int]$PingTimeoutMs = 250,
     [int]$EndpointTimeoutSec = 1,
-    [int]$BatchSize = 64
+    [int]$PingThrottle = 64
 )
 
 if (-not $Payload) {
@@ -44,7 +44,6 @@ function Get-MaskBytesFromPrefixLength {
     $mask = New-Object byte[] 4
     for ($i = 0; $i -lt 4; $i++) {
         $bits = $PrefixLength - ($i * 8)
-
         if ($bits -ge 8) {
             $mask[$i] = 255
         }
@@ -106,39 +105,105 @@ function Get-SubnetHosts {
     return $hosts
 }
 
-function Test-HostAliveBatch {
+function Get-CachedDiscovery {
+    param([string]$InstallDir)
+
+    $configPath = Join-Path $InstallDir "config.json"
+    if (-not (Test-Path $configPath)) {
+        return $null
+    }
+
+    try {
+        return (Get-Content $configPath -Raw | ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Invoke-ParallelPingScan {
     param(
         [string[]]$Ips,
         [int]$TimeoutMs = 250,
-        [int]$BatchSize = 64
+        [int]$Throttle = 64
     )
 
+    $pool = [runspacefactory]::CreateRunspacePool(1, $Throttle)
+    $pool.Open()
+
+    $pending = New-Object System.Collections.ArrayList
     $alive = New-Object System.Collections.Generic.List[string]
+    $submitted = 0
+    $checked = 0
+    $nextLog = 100
 
-    for ($offset = 0; $offset -lt $Ips.Count; $offset += $BatchSize) {
-        $end = [Math]::Min($offset + $BatchSize - 1, $Ips.Count - 1)
-        $batch = $Ips[$offset..$end]
+    try {
+        while ($submitted -lt $Ips.Count -or $pending.Count -gt 0) {
+            while ($submitted -lt $Ips.Count -and $pending.Count -lt $Throttle) {
+                $ip = $Ips[$submitted]
+                $submitted++
 
-        $jobs = @()
-        foreach ($ip in $batch) {
-            $jobs += Start-Job -ArgumentList $ip, $TimeoutMs -ScriptBlock {
-                param($TargetIp, $T)
-                ping.exe -n 1 -w $T $TargetIp *> $null
-                if ($LASTEXITCODE -eq 0) {
-                    $TargetIp
+                $ps = [powershell]::Create()
+                $ps.RunspacePool = $pool
+                [void]$ps.AddScript(@'
+param($TargetIp, $TimeoutMs)
+
+$ping = [System.Net.NetworkInformation.Ping]::new()
+try {
+    $reply = $ping.Send($TargetIp, $TimeoutMs)
+    if ($reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+        $TargetIp
+    }
+}
+finally {
+    $ping.Dispose()
+}
+'@).AddArgument($ip).AddArgument($TimeoutMs)
+
+                $handle = $ps.BeginInvoke()
+                [void]$pending.Add([pscustomobject]@{
+                    PS = $ps
+                    Handle = $handle
+                })
+            }
+
+            for ($i = $pending.Count - 1; $i -ge 0; $i--) {
+                $item = $pending[$i]
+                if ($item.Handle.IsCompleted) {
+                    try {
+                        $result = @($item.PS.EndInvoke($item.Handle))
+                        if ($result.Count -gt 0 -and $result[0]) {
+                            [void]$alive.Add([string]$result[0])
+                        }
+                    }
+                    catch {
+                    }
+                    finally {
+                        $item.PS.Dispose()
+                        [void]$pending.RemoveAt($i)
+                    }
+
+                    $checked++
+                    if ($checked -ge $nextLog -or ($submitted -eq $Ips.Count -and $pending.Count -eq 0)) {
+                        Write-Log "INFO" "Ping progress: checked=$checked alive=$($alive.Count)"
+                        $nextLog += 100
+                    }
                 }
             }
-        }
 
-        $results = Receive-Job -Job $jobs -Wait -AutoRemoveJob
-        foreach ($item in $results) {
-            if ($item) {
-                $alive.Add($item)
-            }
+            Start-Sleep -Milliseconds 25
         }
     }
+    finally {
+        $pool.Close()
+        $pool.Dispose()
+    }
 
-    return $alive.ToArray()
+    return [pscustomobject]@{
+        AliveHosts = $alive.ToArray()
+        Checked    = $checked
+        Total      = $Ips.Count
+    }
 }
 
 function Get-Md5Hex {
@@ -196,11 +261,20 @@ function Build-DigestAuthHeader {
 }
 
 function Test-MinerEndpoint {
-    param([string]$Ip)
+    param(
+        [string]$Ip,
+        [int]$PreferredPort = 0
+    )
 
     $uriPath = "/cgi-bin/stats.cgi"
 
-    foreach ($port in @(80, 8080)) {
+    $ports = @()
+    if ($PreferredPort -gt 0) { $ports += $PreferredPort }
+    $ports += 80
+    $ports += 8080
+    $ports = $ports | Select-Object -Unique
+
+    foreach ($port in $ports) {
         $url = "http://$Ip`:$port$uriPath"
 
         try {
@@ -250,28 +324,53 @@ function Test-MinerEndpoint {
 }
 
 function Discover-Miner {
+    param([string]$InstallDir)
+
     $cfg = Get-PrimaryIPv4Config
     $ip = $cfg.IPv4Address.IPAddress
     $prefix = $cfg.IPv4Address.PrefixLength
+    $gateway = $cfg.IPv4DefaultGateway.NextHop
 
     Write-Log "INFO" "Adapter: $($cfg.InterfaceAlias)"
     Write-Log "INFO" "Local IP: $ip"
     Write-Log "INFO" "Subnet: $ip/$prefix"
 
+    $cached = Get-CachedDiscovery -InstallDir $InstallDir
+    if ($cached -and $cached.miner_ip) {
+        Write-Log "INFO" "Trying cached miner first: $($cached.miner_ip):$($cached.miner_port)"
+        $cachedMiner = Test-MinerEndpoint -Ip $cached.miner_ip -PreferredPort ([int]($cached.miner_port))
+        if ($cachedMiner) {
+            Write-Log "INFO" "Miner found: $($cachedMiner.miner_ip):$($cachedMiner.miner_port) type=$($cachedMiner.miner_type) auth=$($cachedMiner.auth_mode)"
+            return $cachedMiner
+        }
+    }
+
+    Write-Log "INFO" "Trying local IP first: $ip"
+    $localMiner = Test-MinerEndpoint -Ip $ip -PreferredPort 8080
+    if ($localMiner) {
+        Write-Log "INFO" "Miner found: $($localMiner.miner_ip):$($localMiner.miner_port) type=$($localMiner.miner_type) auth=$($localMiner.auth_mode)"
+        return $localMiner
+    }
+
     $hosts = Get-SubnetHosts -Ip $ip -PrefixLength $prefix
+    $hosts = $hosts | Where-Object {
+        $_ -ne $ip -and $_ -ne $gateway -and
+        (-not $cached -or $_ -ne $cached.miner_ip)
+    }
+
     Write-Log "INFO" "Total hosts: $($hosts.Count)"
+    Write-Log "INFO" "Scan mode: parallel ping + endpoint verify"
 
-    $alive = Test-HostAliveBatch -Ips $hosts -TimeoutMs $PingTimeoutMs -BatchSize $BatchSize
-    Write-Log "INFO" "Alive hosts: $($alive.Count)"
+    $scan = Invoke-ParallelPingScan -Ips $hosts -TimeoutMs $PingTimeoutMs -Throttle $PingThrottle
+    Write-Log "INFO" "Alive hosts: $($scan.AliveHosts.Count)"
 
-    foreach ($candidate in $alive) {
+    foreach ($candidate in $scan.AliveHosts) {
         Write-Log "INFO" "Verifying ${candidate}:80/8080"
         $miner = Test-MinerEndpoint -Ip $candidate
         if ($miner) {
             Write-Log "INFO" "Miner found: $($miner.miner_ip):$($miner.miner_port) type=$($miner.miner_type) auth=$($miner.auth_mode)"
             return $miner
         }
-
         Write-Log "WARN" "Candidate rejected: $candidate"
     }
 
@@ -286,7 +385,7 @@ try {
     $machineId = [guid]::NewGuid().ToString()
 
     Write-Log "INFO" "Starting network scan..."
-    $miner = Discover-Miner
+    $miner = Discover-Miner -InstallDir $InstallDir
 
     $config = @{
         payload    = $Payload
@@ -295,8 +394,8 @@ try {
         miner_ip   = if ($miner) { $miner.miner_ip } else { $null }
         miner_port = if ($miner) { $miner.miner_port } else { $null }
         discovery  = @{
-            method   = "batch-ping+endpoint-verify"
-            status   = if ($miner) { "found" } else { "not_found" }
+            method     = "parallel-ping+endpoint-verify"
+            status     = if ($miner) { "found" } else { "not_found" }
             scanned_at = (Get-Date).ToString("o")
             miner_type = if ($miner) { $miner.miner_type } else { $null }
             auth_mode  = if ($miner) { $miner.auth_mode } else { $null }
