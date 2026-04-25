@@ -7,7 +7,7 @@ param(
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
     [int]$PingTimeoutMs = 250,
-    [int]$EndpointTimeoutSec = 1
+    [int]$EndpointTimeoutSec = 2
 )
 
 if (-not $Payload) {
@@ -59,7 +59,6 @@ function Get-MaskBytesFromPrefixLength {
 
 function Convert-BytesToUInt32 {
     param([byte[]]$Bytes)
-
     $tmp = $Bytes.Clone()
     [Array]::Reverse($tmp)
     return [BitConverter]::ToUInt32($tmp, 0)
@@ -67,7 +66,6 @@ function Convert-BytesToUInt32 {
 
 function Convert-UInt32ToIp {
     param([uint32]$Value)
-
     $bytes = [BitConverter]::GetBytes($Value)
     [Array]::Reverse($bytes)
     return ([System.Net.IPAddress]::new($bytes)).ToString()
@@ -98,9 +96,7 @@ function Get-SubnetHosts {
 
     $hosts = New-Object System.Collections.Generic.List[string]
     for ($n = $start; $n -le $end; $n++) {
-        $bytes = [BitConverter]::GetBytes([uint32]$n)
-        [Array]::Reverse($bytes)
-        $hosts.Add(([System.Net.IPAddress]::new($bytes)).ToString())
+        $hosts.Add((Convert-UInt32ToIp -Value ([uint32]$n)))
     }
 
     return $hosts
@@ -129,7 +125,7 @@ function Save-DiscoveryResult {
         [string]$BackendUrl,
         [string]$MachineId,
         [object]$Miner,
-        [object]$DiscoveryMeta
+        [object]$Meta
     )
 
     $config = @{
@@ -139,16 +135,16 @@ function Save-DiscoveryResult {
         miner_ip   = if ($Miner) { $Miner.miner_ip } else { $null }
         miner_port = if ($Miner) { $Miner.miner_port } else { $null }
         discovery  = @{
-            method      = "local-first + subnet-scan"
-            status      = if ($Miner) { "found" } else { "not_found" }
-            scanned_at  = (Get-Date).ToString("o")
-            miner_type  = if ($Miner) { $Miner.miner_type } else { $null }
-            auth_mode   = if ($Miner) { $Miner.auth_mode } else { $null }
-            adapter     = $DiscoveryMeta.adapter
-            subnet      = $DiscoveryMeta.subnet
-            total_hosts = $DiscoveryMeta.total_hosts
-            checked_hosts = $DiscoveryMeta.checked_hosts
-            alive_hosts = $DiscoveryMeta.alive_hosts
+            method       = "local-first + subnet-scan"
+            status       = if ($Miner) { "found" } else { "not_found" }
+            scanned_at   = (Get-Date).ToString("o")
+            miner_type   = if ($Miner) { $Miner.miner_type } else { $null }
+            auth_mode    = if ($Miner) { $Miner.auth_mode } else { $null }
+            adapter      = $Meta.adapter
+            subnet       = $Meta.subnet
+            total_hosts  = $Meta.total_hosts
+            checked_hosts = $Meta.checked_hosts
+            alive_hosts  = $Meta.alive_hosts
         }
     } | ConvertTo-Json -Depth 5
 
@@ -216,9 +212,12 @@ function Test-MinerEndpoint {
     )
 
     $uriPath = "/cgi-bin/stats.cgi"
-
     $ports = @()
-    if ($PreferredPort -gt 0) { $ports += $PreferredPort }
+
+    if ($PreferredPort -gt 0) {
+        $ports += $PreferredPort
+    }
+
     $ports += 8080
     $ports += 80
     $ports = $ports | Select-Object -Unique
@@ -232,8 +231,20 @@ function Test-MinerEndpoint {
             if ($res.StatusCode -eq 200) {
                 try {
                     $json = $res.Content | ConvertFrom-Json -ErrorAction Stop
+
                     if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
                         $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } else { "unknown" }
+                        Write-Log "INFO" "Miner confirmed at ${Ip}:$port (type=$minerType)"
+                        return [pscustomobject]@{
+                            miner_ip   = $Ip
+                            miner_port = $port
+                            miner_type = $minerType
+                            auth_mode  = "open"
+                        }
+                    }
+
+                    if ($json -and $json.INFO -and $json.INFO.Type -and $json.STATS) {
+                        $minerType = $json.INFO.Type
                         Write-Log "INFO" "Miner confirmed at ${Ip}:$port (type=$minerType)"
                         return [pscustomobject]@{
                             miner_ip   = $Ip
@@ -322,15 +333,15 @@ function Discover-Miner {
         return [pscustomobject]@{ Miner = $localMiner; Meta = $meta }
     }
 
-    $hosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway -and (-not $cached -or $_ -ne $cached.miner_ip) })
+    $hosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway })
     $meta.total_hosts = $hosts.Count
 
     Write-Log "INFO" "Total hosts: $($hosts.Count)"
     Write-Log "INFO" "Scanning until first miner is found..."
 
+    $checked = 0
     $alive = New-Object System.Collections.Generic.List[string]
 
-    $checked = 0
     foreach ($candidate in $hosts) {
         $ping = [System.Net.NetworkInformation.Ping]::new()
         try {
@@ -348,6 +359,7 @@ function Discover-Miner {
 
         [void]$alive.Add($candidate)
         $checked++
+
         if (($checked % 100) -eq 0) {
             Write-Log "INFO" "Scan progress: checked=$checked alive=$($alive.Count)"
         }
@@ -385,13 +397,11 @@ try {
         -BackendUrl $BackendUrl `
         -MachineId $machineId `
         -Miner $miner `
-        -DiscoveryMeta $result.Meta
+        -Meta $result.Meta
 
-    Write-Log "INFO" "Downloading agent..."
     $agentDest = Join-Path $InstallDir "agent.js"
     Invoke-WebRequest -Uri $AgentUrl -OutFile $agentDest
 
-    Write-Log "INFO" "Downloading mock telemetry..."
     $mockDest = Join-Path $InstallDir "mock-telemetry.json"
     Invoke-WebRequest -Uri $MockTelemetryUrl -OutFile $mockDest
 
