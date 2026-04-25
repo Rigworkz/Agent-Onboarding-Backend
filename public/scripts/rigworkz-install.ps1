@@ -270,24 +270,22 @@ function Test-MinerEndpoint {
 
     $ports = @()
     if ($PreferredPort -gt 0) { $ports += $PreferredPort }
-    $ports += 80
     $ports += 8080
+    $ports += 80
     $ports = $ports | Select-Object -Unique
 
     foreach ($port in $ports) {
         $url = "http://$Ip`:$port$uriPath"
 
         try {
-            $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-            if ($res.StatusCode -eq 200) {
-                $json = $res.Content | ConvertFrom-Json
-                if ($json.INFO.type -and $json.STATS[0]) {
-                    return [pscustomobject]@{
-                        miner_ip   = $Ip
-                        miner_port = $port
-                        miner_type = $json.INFO.type
-                        auth_mode  = "open"
-                    }
+            $json = Invoke-RestMethod -Uri $url -TimeoutSec $EndpointTimeoutSec -Method Get -ErrorAction Stop
+
+            if ($json -and $json.INFO -and $json.INFO.type -and $json.STATS -and $json.STATS.Count -gt 0) {
+                return [pscustomobject]@{
+                    miner_ip   = $Ip
+                    miner_port = $port
+                    miner_type = $json.INFO.type
+                    auth_mode  = "open"
                 }
             }
         }
@@ -300,16 +298,14 @@ function Test-MinerEndpoint {
                         $challenge = Parse-AuthChallenge -Header $challengeHeader
                         $authHeader = Build-DigestAuthHeader -Method "GET" -UriPath $uriPath -Challenge $challenge -User $MinerUser -Pass $MinerPass
 
-                        $authed = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $authHeader } -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-                        if ($authed.StatusCode -eq 200) {
-                            $json = $authed.Content | ConvertFrom-Json
-                            if ($json.INFO.type -and $json.STATS[0]) {
-                                return [pscustomobject]@{
-                                    miner_ip   = $Ip
-                                    miner_port = $port
-                                    miner_type = $json.INFO.type
-                                    auth_mode  = "digest"
-                                }
+                        $json = Invoke-RestMethod -Uri $url -Headers @{ Authorization = $authHeader } -TimeoutSec $EndpointTimeoutSec -Method Get -ErrorAction Stop
+
+                        if ($json -and $json.INFO -and $json.INFO.type -and $json.STATS -and $json.STATS.Count -gt 0) {
+                            return [pscustomobject]@{
+                                miner_ip   = $Ip
+                                miner_port = $port
+                                miner_type = $json.INFO.type
+                                auth_mode  = "digest"
                             }
                         }
                     }
@@ -359,7 +355,7 @@ function Discover-Miner {
     }
 
     Write-Log "INFO" "Total hosts: $($hosts.Count)"
-    Write-Log "INFO" "Scan mode: parallel ping + endpoint verify"
+    Write-Log "INFO" "Scan mode: parallel ping + immediate verify"
 
     $scan = Invoke-ParallelPingScan -Ips $hosts -TimeoutMs $PingTimeoutMs -Throttle $PingThrottle
     Write-Log "INFO" "Alive hosts: $($scan.AliveHosts.Count)"
@@ -371,6 +367,7 @@ function Discover-Miner {
             Write-Log "INFO" "Miner found: $($miner.miner_ip):$($miner.miner_port) type=$($miner.miner_type) auth=$($miner.auth_mode)"
             return $miner
         }
+
         Write-Log "WARN" "Candidate rejected: $candidate"
     }
 
