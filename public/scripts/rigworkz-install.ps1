@@ -7,8 +7,7 @@ param(
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
     [int]$PingTimeoutMs = 250,
-    [int]$EndpointTimeoutSec = 10,
-    [int[]]$MinerPorts = @(80, 8080, 4028, 8888)
+    [int]$EndpointTimeoutSec = 2
 )
 
 if (-not $Payload) {
@@ -136,16 +135,16 @@ function Save-DiscoveryResult {
         miner_ip   = if ($Miner) { $Miner.miner_ip } else { $null }
         miner_port = if ($Miner) { $Miner.miner_port } else { $null }
         discovery  = @{
-            method        = "local-first + subnet-scan"
-            status        = if ($Miner) { "found" } else { "not_found" }
-            scanned_at    = (Get-Date).ToString("o")
-            miner_type    = if ($Miner) { $Miner.miner_type } else { $null }
-            auth_mode     = if ($Miner) { $Miner.auth_mode } else { $null }
-            adapter       = $Meta.adapter
-            subnet        = $Meta.subnet
-            total_hosts   = $Meta.total_hosts
+            method       = "local-first + subnet-scan"
+            status       = if ($Miner) { "found" } else { "not_found" }
+            scanned_at   = (Get-Date).ToString("o")
+            miner_type   = if ($Miner) { $Miner.miner_type } else { $null }
+            auth_mode    = if ($Miner) { $Miner.auth_mode } else { $null }
+            adapter      = $Meta.adapter
+            subnet       = $Meta.subnet
+            total_hosts  = $Meta.total_hosts
             checked_hosts = $Meta.checked_hosts
-            alive_hosts   = $Meta.alive_hosts
+            alive_hosts  = $Meta.alive_hosts
         }
     } | ConvertTo-Json -Depth 5
 
@@ -206,216 +205,91 @@ function Build-DigestAuthHeader {
         $User, $realm, $nonce, $UriPath, $response)
 }
 
-$ProbeScript = {
-    param(
-        [string]$Ip,
-        [int]$Port,
-        [int]$EndpointTimeoutSec,
-        [string]$MinerUser,
-        [string]$MinerPass
-    )
-
-    function Get-Md5Hex {
-        param([string]$Text)
-
-        $md5 = [System.Security.Cryptography.MD5]::Create()
-        try {
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-            $hash = $md5.ComputeHash($bytes)
-            return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
-        }
-        finally {
-            $md5.Dispose()
-        }
-    }
-
-    function Parse-AuthChallenge {
-        param([string]$Header)
-
-        $out = @{}
-        foreach ($m in [regex]::Matches($Header, '(\w+)=(?:"([^"]+)"|([^\s,]+))')) {
-            $out[$m.Groups[1].Value] = if ($m.Groups[2].Value) { $m.Groups[2].Value } else { $m.Groups[3].Value }
-        }
-        return $out
-    }
-
-    function Build-DigestAuthHeader {
-        param(
-            [string]$Method,
-            [string]$UriPath,
-            [hashtable]$Challenge,
-            [string]$User,
-            [string]$Pass
-        )
-
-        $realm = $Challenge.realm
-        $nonce = $Challenge.nonce
-        $qop = $Challenge.qop
-
-        $ha1 = Get-Md5Hex "$User`:$realm`:$Pass"
-        $ha2 = Get-Md5Hex "$Method`:$UriPath"
-
-        if ($qop -and $qop -like "*auth*") {
-            $nc = "00000001"
-            $cnonce = ([guid]::NewGuid().ToString("N")).Substring(0, 16)
-            $response = Get-Md5Hex "$ha1`:$nonce`:$nc`:$cnonce`:auth`:$ha2"
-
-            return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", qop=auth, nc={4}, cnonce="{5}", response="{6}"' -f `
-                $User, $realm, $nonce, $UriPath, $nc, $cnonce, $response)
-        }
-
-        $response = Get-Md5Hex "$ha1`:$nonce`:$ha2"
-        return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}"' -f `
-            $User, $realm, $nonce, $UriPath, $response)
-    }
-
-    $uriPath = "/cgi-bin/stats.cgi"
-    $url = "http://$Ip`:$Port$uriPath"
-
-    try {
-        $res = $null
-        try {
-            $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-        }
-        catch {
-            $resp = $_.Exception.Response
-            if (-not $resp) {
-                return $null
-            }
-
-            $statusCode = [int]$resp.StatusCode
-
-            if ($statusCode -ne 401) {
-                return $null
-            }
-
-            $header = $resp.Headers["WWW-Authenticate"]
-            if (-not $header) {
-                return $null
-            }
-
-            try {
-                $ch = Parse-AuthChallenge -Header $header
-                $authHdr = Build-DigestAuthHeader `
-                    -Method "GET" `
-                    -UriPath $uriPath `
-                    -Challenge $ch `
-                    -User $MinerUser `
-                    -Pass $MinerPass
-
-                $authed = Invoke-WebRequest `
-                    -Uri $url `
-                    -Headers @{ Authorization = $authHdr } `
-                    -TimeoutSec $EndpointTimeoutSec `
-                    -UseBasicParsing `
-                    -ErrorAction Stop
-
-                if ($authed -and [int]$authed.StatusCode -eq 200) {
-                    $json = $authed.Content | ConvertFrom-Json -ErrorAction Stop
-                    if ($json -and $json.STATS) {
-                        return [pscustomobject]@{
-                            miner_ip   = $Ip
-                            miner_port = $Port
-                            miner_type = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } else { "unknown" }
-                            auth_mode  = "digest"
-                        }
-                    }
-                }
-            }
-            catch {
-                return $null
-            }
-
-            return $null
-        }
-
-        if ($res -and [int]$res.StatusCode -eq 200) {
-            try {
-                $json = $res.Content | ConvertFrom-Json -ErrorAction Stop
-                if ($json -and $json.STATS) {
-                    return [pscustomobject]@{
-                        miner_ip   = $Ip
-                        miner_port = $Port
-                        miner_type = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } else { "unknown" }
-                        auth_mode  = "open"
-                    }
-                }
-            }
-            catch {
-                return $null
-            }
-        }
-    }
-    catch {
-        return $null
-    }
-
-    return $null
-}
-
-function Get-OrderedPorts {
-    param(
-        [int]$PreferredPort = 0,
-        [int[]]$Ports
-    )
-
-    $ordered = New-Object System.Collections.Generic.List[int]
-
-    if ($PreferredPort -gt 0) {
-        [void]$ordered.Add($PreferredPort)
-    }
-
-    foreach ($p in $Ports) {
-        if ($p -gt 0 -and -not $ordered.Contains($p)) {
-            [void]$ordered.Add($p)
-        }
-    }
-
-    return ,$ordered.ToArray()
-}
-
 function Test-MinerEndpoint {
     param(
         [string]$Ip,
         [int]$PreferredPort = 0
     )
 
-    $ports = Get-OrderedPorts -PreferredPort $PreferredPort -Ports $MinerPorts
+    $uriPath = "/cgi-bin/stats.cgi"
+    $ports = @()
 
-    $jobs = @()
-    foreach ($port in $ports) {
-        Write-Log "INFO" "Checking ${Ip}:$port"
-        $jobs += Start-Job -ScriptBlock $ProbeScript -ArgumentList $Ip, $port, $EndpointTimeoutSec, $MinerUser, $MinerPass
+    if ($PreferredPort -gt 0) {
+        $ports += $PreferredPort
     }
 
-    try {
-        while ($jobs.Count -gt 0) {
-            $completedJobs = @(Wait-Job -Job $jobs -Any)
+    $ports += 8080
+    $ports += 80
+    $ports = $ports | Select-Object -Unique
 
-            foreach ($completedJob in $completedJobs) {
-                $result = $null
+    foreach ($port in $ports) {
+        $url = "http://$Ip`:$port$uriPath"
+        Write-Log "INFO" "Checking ${Ip}:$port"
+
+        try {
+            $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
+            if ($res.StatusCode -eq 200) {
                 try {
-                    $result = Receive-Job -Job $completedJob -ErrorAction SilentlyContinue
+                    $json = $res.Content | ConvertFrom-Json -ErrorAction Stop
+
+                    if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
+                        $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } else { "unknown" }
+                        Write-Log "INFO" "Miner confirmed at ${Ip}:$port (type=$minerType)"
+                        return [pscustomobject]@{
+                            miner_ip   = $Ip
+                            miner_port = $port
+                            miner_type = $minerType
+                            auth_mode  = "open"
+                        }
+                    }
+
+                    if ($json -and $json.INFO -and $json.INFO.Type -and $json.STATS) {
+                        $minerType = $json.INFO.Type
+                        Write-Log "INFO" "Miner confirmed at ${Ip}:$port (type=$minerType)"
+                        return [pscustomobject]@{
+                            miner_ip   = $Ip
+                            miner_port = $port
+                            miner_type = $minerType
+                            auth_mode  = "open"
+                        }
+                    }
+
+                    Write-Log "WARN" "200 OK but invalid miner JSON from ${Ip}:$port"
                 }
                 catch {
-                }
-
-                Remove-Job -Job $completedJob -Force -ErrorAction SilentlyContinue
-                $jobs = @($jobs | Where-Object { $_.Id -ne $completedJob.Id })
-
-                if ($result) {
-                    foreach ($otherJob in $jobs) {
-                        Stop-Job -Job $otherJob -ErrorAction SilentlyContinue
-                        Remove-Job -Job $otherJob -Force -ErrorAction SilentlyContinue
-                    }
-                    return $result
+                    Write-Log "WARN" "JSON parse failed for ${Ip}:$port"
                 }
             }
         }
-    }
-    finally {
-        foreach ($job in $jobs) {
-            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        catch {
+            $resp = $_.Exception.Response
+            if ($resp -and [int]$resp.StatusCode -eq 401) {
+                $header = $resp.Headers["WWW-Authenticate"]
+                if ($header) {
+                    try {
+                        $ch = Parse-AuthChallenge -Header $header
+                        $authHdr = Build-DigestAuthHeader -Method "GET" -UriPath $uriPath -Challenge $ch -User $MinerUser -Pass $MinerPass
+
+                        $authed = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $authHdr } -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
+                        if ($authed.StatusCode -eq 200) {
+                            $json = $authed.Content | ConvertFrom-Json -ErrorAction Stop
+                            if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
+                                $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } else { "unknown" }
+                                Write-Log "INFO" "Miner confirmed at ${Ip}:$port via digest (type=$minerType)"
+                                return [pscustomobject]@{
+                                    miner_ip   = $Ip
+                                    miner_port = $port
+                                    miner_type = $minerType
+                                    auth_mode  = "digest"
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Log "WARN" "Digest auth failed for ${Ip}:$port"
+                    }
+                }
+            }
         }
     }
 
@@ -435,11 +309,11 @@ function Discover-Miner {
     Write-Log "INFO" "Subnet: $ip/$prefix"
 
     $meta = @{
-        adapter       = $cfg.InterfaceAlias
-        subnet        = "$ip/$prefix"
-        total_hosts   = 0
+        adapter = $cfg.InterfaceAlias
+        subnet = "$ip/$prefix"
+        total_hosts = 0
         checked_hosts = 0
-        alive_hosts   = 0
+        alive_hosts = 0
     }
 
     $cached = Get-CachedDiscovery -InstallDir $InstallDir
@@ -490,7 +364,7 @@ function Discover-Miner {
             Write-Log "INFO" "Scan progress: checked=$checked alive=$($alive.Count)"
         }
 
-        Write-Log "INFO" "Verifying ${candidate} on ports $($MinerPorts -join ',')"
+        Write-Log "INFO" "Verifying ${candidate}:80/8080"
         $miner = Test-MinerEndpoint -Ip $candidate
         if ($miner) {
             $meta.checked_hosts = $checked
