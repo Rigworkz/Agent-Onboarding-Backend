@@ -273,60 +273,82 @@ $ProbeScript = {
     $url = "http://$Ip`:$Port$uriPath"
 
     try {
-        $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction SilentlyContinue
+        $res = $null
+        try {
+            $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
+        }
+        catch {
+            $resp = $_.Exception.Response
+            if (-not $resp) {
+                return $null
+            }
 
-        # Direct 200 (no auth case)
-        if ($res -and $res.StatusCode -eq 200) {
+            $statusCode = [int]$resp.StatusCode
+
+            if ($statusCode -ne 401) {
+                return $null
+            }
+
+            $header = $resp.Headers["WWW-Authenticate"]
+            if (-not $header) {
+                return $null
+            }
+
+            try {
+                $ch = Parse-AuthChallenge -Header $header
+                $authHdr = Build-DigestAuthHeader `
+                    -Method "GET" `
+                    -UriPath $uriPath `
+                    -Challenge $ch `
+                    -User $MinerUser `
+                    -Pass $MinerPass
+
+                $authed = Invoke-WebRequest `
+                    -Uri $url `
+                    -Headers @{ Authorization = $authHdr } `
+                    -TimeoutSec $EndpointTimeoutSec `
+                    -UseBasicParsing `
+                    -ErrorAction Stop
+
+                if ($authed -and [int]$authed.StatusCode -eq 200) {
+                    $json = $authed.Content | ConvertFrom-Json -ErrorAction Stop
+                    if ($json -and $json.STATS) {
+                        return [pscustomobject]@{
+                            miner_ip   = $Ip
+                            miner_port = $Port
+                            miner_type = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } else { "unknown" }
+                            auth_mode  = "digest"
+                        }
+                    }
+                }
+            }
+            catch {
+                return $null
+            }
+
+            return $null
+        }
+
+        if ($res -and [int]$res.StatusCode -eq 200) {
             try {
                 $json = $res.Content | ConvertFrom-Json -ErrorAction Stop
                 if ($json -and $json.STATS) {
                     return [pscustomobject]@{
                         miner_ip   = $Ip
                         miner_port = $Port
-                        miner_type = "unknown"
+                        miner_type = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } else { "unknown" }
                         auth_mode  = "open"
                     }
                 }
-            } catch {}
-        }
-
-        # Digest auth flow
-        if ($res -and $res.StatusCode -eq 401) {
-            $header = $res.Headers["WWW-Authenticate"]
-
-            if ($header) {
-                try {
-                    $ch = Parse-AuthChallenge -Header $header
-                    $authHdr = Build-DigestAuthHeader `
-                        -Method "GET" `
-                        -UriPath $uriPath `
-                        -Challenge $ch `
-                        -User $MinerUser `
-                        -Pass $MinerPass
-
-                    $authed = Invoke-WebRequest `
-                        -Uri $url `
-                        -Headers @{ Authorization = $authHdr } `
-                        -TimeoutSec $EndpointTimeoutSec `
-                        -UseBasicParsing `
-                        -ErrorAction SilentlyContinue
-
-                    if ($authed -and $authed.StatusCode -eq 200) {
-                        $json = $authed.Content | ConvertFrom-Json -ErrorAction Stop
-                        if ($json -and $json.STATS) {
-                            return [pscustomobject]@{
-                                miner_ip   = $Ip
-                                miner_port = $Port
-                                miner_type = "unknown"
-                                auth_mode  = "digest"
-                            }
-                        }
-                    }
-                } catch {}
+            }
+            catch {
+                return $null
             }
         }
     }
-    catch {}
+    catch {
+        return $null
+    }
 
     return $null
 }
