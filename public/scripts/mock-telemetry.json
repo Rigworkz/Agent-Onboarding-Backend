@@ -1,0 +1,24 @@
+{
+  "STATUS": [
+    { "STATUS": "S", "Code": 11, "Msg": "Stats", "Description": "cgminer" }
+  ],
+  "INFO": {
+    "type": "Antminer S19",
+    "miner": "cgminer"
+  },
+  "STATS": [
+    {
+      "rate_avg": 95000,
+      "rate_5s": 94500,
+      "rate_30m": 95100,
+      "elapsed": 86400,
+      "watt": 3250,
+      "fan": [4200, 4300],
+      "chain": [
+        { "temp_chip": [72, 74, 71], "hw": 0 },
+        { "temp_chip": [73, 75, 72], "hw": 0 }
+      ]
+    }
+  ],
+  "id": 1
+}
