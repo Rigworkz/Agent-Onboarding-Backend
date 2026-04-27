@@ -273,52 +273,60 @@ $ProbeScript = {
     $url = "http://$Ip`:$Port$uriPath"
 
     try {
-        $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-        if ($res.StatusCode -eq 200) {
+        $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction SilentlyContinue
+
+        # Direct 200 (no auth case)
+        if ($res -and $res.StatusCode -eq 200) {
             try {
                 $json = $res.Content | ConvertFrom-Json -ErrorAction Stop
-                if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
-                    $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } else { "unknown" }
+                if ($json -and $json.STATS) {
                     return [pscustomobject]@{
                         miner_ip   = $Ip
                         miner_port = $Port
-                        miner_type = $minerType
+                        miner_type = "unknown"
                         auth_mode  = "open"
                     }
                 }
-            }
-            catch {
-            }
+            } catch {}
         }
-    }
-    catch {
-        $resp = $_.Exception.Response
-        if ($resp -and [int]$resp.StatusCode -eq 401) {
-            $header = $resp.Headers["WWW-Authenticate"]
+
+        # Digest auth flow
+        if ($res -and $res.StatusCode -eq 401) {
+            $header = $res.Headers["WWW-Authenticate"]
+
             if ($header) {
                 try {
                     $ch = Parse-AuthChallenge -Header $header
-                    $authHdr = Build-DigestAuthHeader -Method "GET" -UriPath $uriPath -Challenge $ch -User $MinerUser -Pass $MinerPass
+                    $authHdr = Build-DigestAuthHeader `
+                        -Method "GET" `
+                        -UriPath $uriPath `
+                        -Challenge $ch `
+                        -User $MinerUser `
+                        -Pass $MinerPass
 
-                    $authed = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $authHdr } -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-                    if ($authed.StatusCode -eq 200) {
+                    $authed = Invoke-WebRequest `
+                        -Uri $url `
+                        -Headers @{ Authorization = $authHdr } `
+                        -TimeoutSec $EndpointTimeoutSec `
+                        -UseBasicParsing `
+                        -ErrorAction SilentlyContinue
+
+                    if ($authed -and $authed.StatusCode -eq 200) {
                         $json = $authed.Content | ConvertFrom-Json -ErrorAction Stop
-                        if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
-                            $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } else { "unknown" }
+                        if ($json -and $json.STATS) {
                             return [pscustomobject]@{
                                 miner_ip   = $Ip
                                 miner_port = $Port
-                                miner_type = $minerType
+                                miner_type = "unknown"
                                 auth_mode  = "digest"
                             }
                         }
                     }
-                }
-                catch {
-                }
+                } catch {}
             }
         }
     }
+    catch {}
 
     return $null
 }
