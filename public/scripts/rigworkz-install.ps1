@@ -351,10 +351,10 @@ function Test-MinerEndpoint {
     )
 
     $ports = Get-OrderedPorts -PreferredPort $PreferredPort -Ports $MinerPorts
+    Write-Log "INFO" "Checking $Ip on ports $($ports -join ', ')"
 
     $jobs = @()
     foreach ($port in $ports) {
-        Write-Log "INFO" "Checking ${Ip}:$port"
         $jobs += Start-Job -ScriptBlock $ProbeScript -ArgumentList $Ip, $port, $EndpointTimeoutSec, $MinerUser, $MinerPass
     }
 
@@ -395,12 +395,14 @@ function Test-MinerEndpoint {
 function Discover-Miner {
     param([string]$InstallDir)
 
+    Write-Log "INFO" "Initiating ping scan"
+
     $cfg = Get-PrimaryIPv4Config
     $ip = $cfg.IPv4Address.IPAddress
     $prefix = $cfg.IPv4Address.PrefixLength
     $gateway = $cfg.IPv4DefaultGateway.NextHop
 
-    Write-Log "INFO" "Adapter: $($cfg.InterfaceAlias)"
+    Write-Log "INFO" "Adapter found: $($cfg.InterfaceAlias)"
     Write-Log "INFO" "Local IP: $ip"
     Write-Log "INFO" "Subnet: $ip/$prefix"
 
@@ -414,26 +416,25 @@ function Discover-Miner {
 
     $cached = Get-CachedDiscovery -InstallDir $InstallDir
     if ($cached -and $cached.miner_ip) {
-        Write-Log "INFO" "Trying cached miner first: $($cached.miner_ip):$($cached.miner_port)"
+        Write-Log "INFO" "Checking cached miner: $($cached.miner_ip):$($cached.miner_port)"
         $cachedMiner = Test-MinerEndpoint -Ip $cached.miner_ip -PreferredPort ([int]($cached.miner_port))
         if ($cachedMiner) {
+            Write-Log "INFO" "Miner found: $($cachedMiner.miner_ip):$($cachedMiner.miner_port)"
             return [pscustomobject]@{ Miner = $cachedMiner; Meta = $meta }
         }
-        Write-Log "WARN" "Cached miner not reachable, continuing"
+        Write-Log "INFO" "Cached miner not reachable, continuing"
     }
 
-    Write-Log "INFO" "Trying local IP first: $ip"
+    Write-Log "INFO" "Scanning subnet for miner"
+
     $localMiner = Test-MinerEndpoint -Ip $ip -PreferredPort 8080
     if ($localMiner) {
-        Write-Log "INFO" "Miner found immediately: $($localMiner.miner_ip):$($localMiner.miner_port)"
+        Write-Log "INFO" "Miner found: $($localMiner.miner_ip):$($localMiner.miner_port)"
         return [pscustomobject]@{ Miner = $localMiner; Meta = $meta }
     }
 
     $hosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway })
     $meta.total_hosts = $hosts.Count
-
-    Write-Log "INFO" "Total hosts: $($hosts.Count)"
-    Write-Log "INFO" "Scanning until first miner is found..."
 
     $checked = 0
     $alive = New-Object System.Collections.Generic.List[string]
@@ -456,23 +457,22 @@ function Discover-Miner {
         [void]$alive.Add($candidate)
         $checked++
 
-        if (($checked % 100) -eq 0) {
-            Write-Log "INFO" "Scan progress: checked=$checked alive=$($alive.Count)"
+        if (($checked % 75) -eq 0) {
+            Write-Log "INFO" "Scan progress: checked $checked hosts, $($alive.Count) responded"
         }
 
-        Write-Log "INFO" "Verifying ${candidate} on ports $($MinerPorts -join ',')"
         $miner = Test-MinerEndpoint -Ip $candidate
         if ($miner) {
             $meta.checked_hosts = $checked
             $meta.alive_hosts = $alive.Count
+            Write-Log "INFO" "Miner found: $($miner.miner_ip):$($miner.miner_port)"
             return [pscustomobject]@{ Miner = $miner; Meta = $meta }
         }
-
-        Write-Log "WARN" "Candidate rejected: $candidate"
     }
 
     $meta.checked_hosts = $checked
     $meta.alive_hosts = $alive.Count
+    Write-Log "WARN" "Miner not found on this network"
     return [pscustomobject]@{ Miner = $null; Meta = $meta }
 }
 
@@ -483,10 +483,10 @@ try {
 
     $machineId = [guid]::NewGuid().ToString()
 
-    Write-Log "INFO" "Starting network scan..."
     $result = Discover-Miner -InstallDir $InstallDir
     $miner = $result.Miner
 
+    Write-Log "INFO" "Saving discovery result"
     Save-DiscoveryResult `
         -InstallDir $InstallDir `
         -Payload $Payload `
@@ -495,9 +495,11 @@ try {
         -Miner $miner `
         -Meta $result.Meta
 
+    Write-Log "INFO" "Downloading agent"
     $agentDest = Join-Path $InstallDir "agent.js"
     Invoke-WebRequest -Uri $AgentUrl -OutFile $agentDest
 
+    Write-Log "INFO" "Downloading telemetry mock"
     $mockDest = Join-Path $InstallDir "mock-telemetry.json"
     Invoke-WebRequest -Uri $MockTelemetryUrl -OutFile $mockDest
 
@@ -506,8 +508,9 @@ try {
         exit 1
     }
 
-    Write-Log "INFO" "Starting agent..."
+    Write-Log "INFO" "Starting agent"
     Start-Process -FilePath "node" -ArgumentList "`"$agentDest`"" -WorkingDirectory $InstallDir -NoNewWindow
+    Write-Log "INFO" "Agent started"
 }
 catch {
     Write-Host "Installation failed: $($_.Exception.Message)"
