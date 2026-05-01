@@ -3,7 +3,7 @@ import { getHealth } from '../controllers/healthController';
 import { login, getNonce } from '../controllers/authController';
 import { authenticateToken } from '../middleware/auth';
 import { verifyWallet, validateInstallToken } from '../controllers/authController';
-import { onboardMachine, getMachine, getAllMachines, getMachineStatus, getMachineTelemetry, getMachineIdByWallet, generateAndSaveFingerprint } from '../controllers/machineController';
+import { onboardMachine, getMachine, getEncryptedAddress, getAllMachines, getMachineStatus, getMachineTelemetry, getMachineIdByWallet, generateAndSaveFingerprint, registerMachine } from '../controllers/machineController';
 
 
 
@@ -44,6 +44,8 @@ router.post('/auth/verify', verifyWallet);
 router.post('/validate-token', validateInstallToken);
 router.get("/machine-id/:address", getMachineIdByWallet);
 router.post("/generate-hash", authenticateToken, generateAndSaveFingerprint);
+router.post("/register", registerMachine);
+router.get("/encrypted-address", getEncryptedAddress);
 
 // Example protected route
 /**
