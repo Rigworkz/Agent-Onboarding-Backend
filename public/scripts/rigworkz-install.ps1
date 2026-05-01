@@ -6,7 +6,7 @@ param(
     [string]$InstallDir = "C:\rigworkz-agent",
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
-    [int]$PingTimeoutMs = 500,
+    [int]$TcpConnectTimeoutMs = 300,
     [int]$EndpointTimeoutSec = 10,
     [int[]]$MinerPorts = @(80, 8080, 4028, 8888)
 )
@@ -144,7 +144,7 @@ function Save-DiscoveryResult {
         miner_ip   = if ($Miner) { $Miner.miner_ip } else { $null }
         miner_port = if ($Miner) { $Miner.miner_port } else { $null }
         discovery  = @{
-            method        = "local-first + subnet-scan"
+            method        = "local-first + tcp-scan"
             status        = if ($Miner) { "found" } else { "not_found" }
             scanned_at    = (Get-Date).ToString("o")
             miner_type    = if ($Miner) { $Miner.miner_type } else { $null }
@@ -399,31 +399,38 @@ function Test-MinerEndpoint {
     return $null
 }
 
-# Pings all hosts in parallel using a RunspacePool.
-# Works correctly on PowerShell 5 (unlike SendPingAsync+WaitAll which deadlocks on STA thread).
-function Get-AliveHosts {
+# TCP connect scan run in parallel via RunspacePool.
+# Tries each miner port on every host simultaneously.
+# Returns IPs where at least one miner port accepted a connection.
+# Avoids ICMP entirely -- works even when ping is blocked by firewall or router.
+function Get-TcpAliveHosts {
     param(
         [string[]]$Hosts,
+        [int[]]$Ports,
         [int]$TimeoutMs
     )
 
-    $pingBlock = {
-        param([string]$Ip, [int]$Ms)
-        $p = [System.Net.NetworkInformation.Ping]::new()
-        try {
-            $r = $p.Send($Ip, $Ms)
-            if ($r -and $r.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
-                return $Ip
+    $tcpBlock = {
+        param([string]$Ip, [int[]]$Ports, [int]$TimeoutMs)
+        foreach ($port in $Ports) {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            try {
+                $ar = $tcp.BeginConnect($Ip, $port, $null, $null)
+                $ok = $ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
+                if ($ok -and $tcp.Connected) {
+                    return $Ip
+                }
             }
-        }
-        catch { }
-        finally {
-            $p.Dispose()
+            catch { }
+            finally {
+                try { $tcp.Close() } catch { }
+            }
         }
         return $null
     }
 
-    $pool = [RunspaceFactory]::CreateRunspacePool(1, [Math]::Min($Hosts.Count, 256))
+    $maxRunspaces = [Math]::Min($Hosts.Count, 300)
+    $pool = [RunspaceFactory]::CreateRunspacePool(1, $maxRunspaces)
     $pool.Open()
 
     $handles = [System.Collections.Generic.List[object]]::new()
@@ -431,7 +438,7 @@ function Get-AliveHosts {
     foreach ($h in $Hosts) {
         $ps = [PowerShell]::Create()
         $ps.RunspacePool = $pool
-        [void]$ps.AddScript($pingBlock).AddArgument($h).AddArgument($TimeoutMs)
+        [void]$ps.AddScript($tcpBlock).AddArgument($h).AddArgument($Ports).AddArgument($TimeoutMs)
         $handles.Add([pscustomobject]@{ PS = $ps; Handle = $ps.BeginInvoke() })
     }
 
@@ -497,19 +504,26 @@ function Discover-Miner {
         return [pscustomobject]@{ Miner = $localMiner; Meta = $meta }
     }
 
-    # --- Parallel ping sweep via RunspacePool ---
+    # --- Parallel TCP port scan (no ICMP needed) ---
     $allHosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway })
     $meta.total_hosts = $allHosts.Count
 
     Write-Host ""
-    Write-Log "INFO" "Pinging $($allHosts.Count) hosts in parallel ..."
+    Write-Log "INFO" "Scanning $($allHosts.Count) hosts on ports $($MinerPorts -join '/') ..."
 
-    $aliveHosts = @(Get-AliveHosts -Hosts $allHosts -TimeoutMs $PingTimeoutMs)
+    $aliveHosts = @(Get-TcpAliveHosts -Hosts $allHosts -Ports $MinerPorts -TimeoutMs $TcpConnectTimeoutMs)
 
     $meta.alive_hosts = $aliveHosts.Count
-    Write-Log "INFO" "$($aliveHosts.Count) host(s) responded - probing for miner ..."
 
-    # --- Probe each alive host ---
+    if ($aliveHosts.Count -eq 0) {
+        Write-Log "WARN" "No hosts with open miner ports found"
+        $meta.checked_hosts = 0
+        return [pscustomobject]@{ Miner = $null; Meta = $meta }
+    }
+
+    Write-Log "INFO" "$($aliveHosts.Count) host(s) with open ports - verifying miner ..."
+
+    # --- Full HTTP probe on hosts that had an open port ---
     $checked = 0
     foreach ($candidate in $aliveHosts) {
         $checked++
@@ -549,7 +563,7 @@ try {
         Write-Log "OK"   "Miner found - $($miner.miner_ip):$($miner.miner_port) ($($miner.miner_type), auth: $($miner.auth_mode))"
     }
     else {
-        Write-Log "WARN" "No miner found on this network (scanned $($result.Meta.checked_hosts) hosts, $($result.Meta.alive_hosts) alive)"
+        Write-Log "WARN" "No miner found on this network (scanned $($result.Meta.checked_hosts) hosts, $($result.Meta.alive_hosts) with open ports)"
     }
 
     Write-Host ""
