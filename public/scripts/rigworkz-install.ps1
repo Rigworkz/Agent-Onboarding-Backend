@@ -6,7 +6,7 @@ param(
     [string]$InstallDir = "C:\rigworkz-agent",
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
-    [int]$PingTimeoutMs = 250,
+    [int]$PingTimeoutMs = 500,
     [int]$EndpointTimeoutSec = 10,
     [int[]]$MinerPorts = @(80, 8080, 4028, 8888)
 )
@@ -399,6 +399,50 @@ function Test-MinerEndpoint {
     return $null
 }
 
+# Pings all hosts simultaneously using async .NET API.
+# Returns a list of IPs that responded, sorted by how fast they replied.
+function Get-AliveHosts {
+    param(
+        [string[]]$Hosts,
+        [int]$TimeoutMs
+    )
+
+    $entries = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($h in $Hosts) {
+        $p = [System.Net.NetworkInformation.Ping]::new()
+        $entries.Add([pscustomobject]@{
+            Ip   = $h
+            Ping = $p
+            Task = $p.SendPingAsync($h, $TimeoutMs)
+        })
+    }
+
+    try {
+        [System.Threading.Tasks.Task]::WaitAll(($entries | ForEach-Object { $_.Task }))
+    }
+    catch {
+        # WaitAll throws AggregateException if any task faulted -- that is fine,
+        # we check individual results below.
+    }
+
+    $alive = [System.Collections.Generic.List[string]]::new()
+    foreach ($e in $entries) {
+        try {
+            if ($e.Task.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion -and
+                $e.Task.Result.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                [void]$alive.Add($e.Ip)
+            }
+        }
+        catch { }
+        finally {
+            try { $e.Ping.Dispose() } catch { }
+        }
+    }
+
+    return $alive
+}
+
 function Discover-Miner {
     param([string]$InstallDir)
 
@@ -420,6 +464,7 @@ function Discover-Miner {
         alive_hosts   = 0
     }
 
+    # --- Check cache first ---
     $cached = Get-CachedDiscovery -InstallDir $InstallDir
     if ($cached -and $cached.miner_ip) {
         Write-Log "INFO" "Trying last known miner at $($cached.miner_ip):$($cached.miner_port) ..."
@@ -431,6 +476,7 @@ function Discover-Miner {
         Write-Log "WARN" "Cached miner not responding, moving on"
     }
 
+    # --- Try local IP before scanning ---
     Write-Log "INFO" "Checking local machine (ports $($MinerPorts -join ' / ')) ..."
     $localMiner = Test-MinerEndpoint -Ip $ip -PreferredPort 8080
     if ($localMiner) {
@@ -438,47 +484,30 @@ function Discover-Miner {
         return [pscustomobject]@{ Miner = $localMiner; Meta = $meta }
     }
 
-    $hosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway })
-    $meta.total_hosts = $hosts.Count
+    # --- Parallel ping sweep ---
+    $allHosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway })
+    $meta.total_hosts = $allHosts.Count
 
     Write-Host ""
-    Write-Log "INFO" "Initiating ping scan across $($hosts.Count) hosts ..."
+    Write-Log "INFO" "Pinging $($allHosts.Count) hosts in parallel ..."
 
+    $aliveHosts = Get-AliveHosts -Hosts $allHosts -TimeoutMs $PingTimeoutMs
+
+    $meta.alive_hosts = $aliveHosts.Count
+    Write-Log "INFO" "$($aliveHosts.Count) host(s) responded - probing for miner ..."
+
+    # --- Probe each alive host ---
     $checked = 0
-    $alive = New-Object System.Collections.Generic.List[string]
-
-    foreach ($candidate in $hosts) {
-        $ping = [System.Net.NetworkInformation.Ping]::new()
-        try {
-            $reply = $ping.Send($candidate, $PingTimeoutMs)
-            if (-not ($reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success)) {
-                continue
-            }
-        }
-        catch {
-            continue
-        }
-        finally {
-            $ping.Dispose()
-        }
-
-        [void]$alive.Add($candidate)
+    foreach ($candidate in $aliveHosts) {
         $checked++
-
-        if (($alive.Count % 10) -eq 0) {
-            Write-Log "INFO" "Still scanning ... $($alive.Count) hosts alive so far"
-        }
-
         $miner = Test-MinerEndpoint -Ip $candidate
         if ($miner) {
             $meta.checked_hosts = $checked
-            $meta.alive_hosts = $alive.Count
             return [pscustomobject]@{ Miner = $miner; Meta = $meta }
         }
     }
 
     $meta.checked_hosts = $checked
-    $meta.alive_hosts = $alive.Count
     return [pscustomobject]@{ Miner = $null; Meta = $meta }
 }
 
