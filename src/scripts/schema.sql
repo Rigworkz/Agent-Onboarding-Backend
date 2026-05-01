@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS machines (
     worker_id VARCHAR(100),
     fingerprint VARCHAR(255) UNIQUE,
     created_at BIGINT,
-    signature TEXT
+    signature TEXT,
+    public_key TEXT
 );
 
 CREATE TABLE IF NOT EXISTS machine_status (

@@ -350,3 +350,78 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
     }
 };
 
+export const registerMachine = async (req: Request, res: Response) => {
+    try {
+        const { installToken, machineId, publicKey } = req.body;
+        if (!installToken || !machineId || !publicKey) {
+            return res.status(400).json({ message: "Missing required fields" });
+        }
+        const [rows]: any = await pool.query(
+            `SELECT * FROM wallet_sessions 
+       WHERE install_token = ? 
+       AND token_expires_at > ?`,
+            [installToken, Date.now()]
+        );
+        if (rows.length === 0) {
+            return res.status(401).json({ message: "Invalid or expired token" });
+        }
+        const session = rows[0];
+        const walletAddress = session.address;
+        if (!walletAddress) {
+            console.error("Session missing operator_wallet:", session);
+            return res.status(500).json({ message: "Wallet address missing in session" });
+        }
+        await pool.query(
+            `INSERT INTO machines (machine_id, operator_wallet, public_key)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE 
+                machine_id = VALUES(machine_id),
+                public_key = VALUES(public_key)`,
+            [machineId, walletAddress.toLowerCase(), publicKey]
+        );
+        return res.json({ success: true });
+
+    } catch (error) {
+        console.error("Registration error:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+
+export const getEncryptedAddress = async (req: Request, res: Response) => {
+    try {
+        const { machineId } = req.query;
+        if (!machineId) {
+            return res.status(400).json({ message: "Machine id is required" });
+        }
+        const [rows]: any = await pool.query(
+            `SELECT operator_wallet, public_key
+             FROM machines
+             WHERE machine_id =?`,
+            [machineId]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ message: "Machine not found" });
+        }
+        const { operator_wallet, public_key } = rows[0];
+        if (!operator_wallet || !public_key) {
+            return res.status(500).json({ message: "missing data in DB" });
+        }
+        const cleanKey: string = public_key.replace(/\\n/g, "\n").replace(/^\s+|\s+$/gm, "").trim();
+        const encrypted = crypto.publicEncrypt(
+            {
+                key: cleanKey,
+                padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+            },
+            Buffer.from(operator_wallet)
+        );
+        const encryptedBase64 = encrypted.toString("base64");
+        return res.json({
+            success: true,
+            encryptedAddress: encryptedBase64
+        });
+    } catch (error) {
+        console.error("Encryption error: ", error);
+        return res.status(500).json({ message: "Internal Server error" });
+    }
+};
