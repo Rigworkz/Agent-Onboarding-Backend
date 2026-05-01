@@ -399,46 +399,59 @@ function Test-MinerEndpoint {
     return $null
 }
 
-# Pings all hosts simultaneously using async .NET API.
-# Returns a list of IPs that responded, sorted by how fast they replied.
+# Pings all hosts in parallel using a RunspacePool.
+# Works correctly on PowerShell 5 (unlike SendPingAsync+WaitAll which deadlocks on STA thread).
 function Get-AliveHosts {
     param(
         [string[]]$Hosts,
         [int]$TimeoutMs
     )
 
-    $entries = [System.Collections.Generic.List[object]]::new()
-
-    foreach ($h in $Hosts) {
+    $pingBlock = {
+        param([string]$Ip, [int]$Ms)
         $p = [System.Net.NetworkInformation.Ping]::new()
-        $entries.Add([pscustomobject]@{
-            Ip   = $h
-            Ping = $p
-            Task = $p.SendPingAsync($h, $TimeoutMs)
-        })
-    }
-
-    try {
-        [System.Threading.Tasks.Task]::WaitAll(($entries | ForEach-Object { $_.Task }))
-    }
-    catch {
-        # WaitAll throws AggregateException if any task faulted -- that is fine,
-        # we check individual results below.
-    }
-
-    $alive = [System.Collections.Generic.List[string]]::new()
-    foreach ($e in $entries) {
         try {
-            if ($e.Task.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion -and
-                $e.Task.Result.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
-                [void]$alive.Add($e.Ip)
+            $r = $p.Send($Ip, $Ms)
+            if ($r -and $r.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                return $Ip
             }
         }
         catch { }
         finally {
-            try { $e.Ping.Dispose() } catch { }
+            $p.Dispose()
+        }
+        return $null
+    }
+
+    $pool = [RunspaceFactory]::CreateRunspacePool(1, [Math]::Min($Hosts.Count, 256))
+    $pool.Open()
+
+    $handles = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($h in $Hosts) {
+        $ps = [PowerShell]::Create()
+        $ps.RunspacePool = $pool
+        [void]$ps.AddScript($pingBlock).AddArgument($h).AddArgument($TimeoutMs)
+        $handles.Add([pscustomobject]@{ PS = $ps; Handle = $ps.BeginInvoke() })
+    }
+
+    $alive = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($entry in $handles) {
+        try {
+            $res = $entry.PS.EndInvoke($entry.Handle)
+            if ($res -and $res[0]) {
+                [void]$alive.Add($res[0])
+            }
+        }
+        catch { }
+        finally {
+            $entry.PS.Dispose()
         }
     }
+
+    $pool.Close()
+    $pool.Dispose()
 
     return $alive
 }
@@ -484,14 +497,14 @@ function Discover-Miner {
         return [pscustomobject]@{ Miner = $localMiner; Meta = $meta }
     }
 
-    # --- Parallel ping sweep ---
+    # --- Parallel ping sweep via RunspacePool ---
     $allHosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway })
     $meta.total_hosts = $allHosts.Count
 
     Write-Host ""
     Write-Log "INFO" "Pinging $($allHosts.Count) hosts in parallel ..."
 
-    $aliveHosts = Get-AliveHosts -Hosts $allHosts -TimeoutMs $PingTimeoutMs
+    $aliveHosts = @(Get-AliveHosts -Hosts $allHosts -TimeoutMs $PingTimeoutMs)
 
     $meta.alive_hosts = $aliveHosts.Count
     Write-Log "INFO" "$($aliveHosts.Count) host(s) responded - probing for miner ..."
