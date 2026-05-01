@@ -6,7 +6,7 @@ param(
     [string]$InstallDir = "C:\rigworkz-agent",
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
-    [int]$TcpConnectTimeoutMs = 300,
+    [int]$PingTimeoutMs = 500,
     [int]$EndpointTimeoutSec = 10,
     [int[]]$MinerPorts = @(80, 8080, 4028, 8888)
 )
@@ -133,6 +133,7 @@ function Save-DiscoveryResult {
         [string]$Payload,
         [string]$BackendUrl,
         [string]$MachineId,
+        [string]$PublicKey,
         [object]$Miner,
         [object]$Meta
     )
@@ -141,10 +142,11 @@ function Save-DiscoveryResult {
         payload    = $Payload
         backendUrl = $BackendUrl
         machine_id = $MachineId
+        public_key = $PublicKey
         miner_ip   = if ($Miner) { $Miner.miner_ip } else { $null }
         miner_port = if ($Miner) { $Miner.miner_port } else { $null }
         discovery  = @{
-            method        = "local-first + tcp-scan"
+            method        = "local-first + subnet-scan"
             status        = if ($Miner) { "found" } else { "not_found" }
             scanned_at    = (Get-Date).ToString("o")
             miner_type    = if ($Miner) { $Miner.miner_type } else { $null }
@@ -399,66 +401,46 @@ function Test-MinerEndpoint {
     return $null
 }
 
-# TCP connect scan run in parallel via RunspacePool.
-# Tries each miner port on every host simultaneously.
-# Returns IPs where at least one miner port accepted a connection.
-# Avoids ICMP entirely -- works even when ping is blocked by firewall or router.
-function Get-TcpAliveHosts {
+# Pings all hosts simultaneously using async .NET API.
+# Returns a list of IPs that responded, sorted by how fast they replied.
+function Get-AliveHosts {
     param(
         [string[]]$Hosts,
-        [int[]]$Ports,
         [int]$TimeoutMs
     )
 
-    $tcpBlock = {
-        param([string]$Ip, [int[]]$Ports, [int]$TimeoutMs)
-        foreach ($port in $Ports) {
-            $tcp = New-Object System.Net.Sockets.TcpClient
-            try {
-                $ar = $tcp.BeginConnect($Ip, $port, $null, $null)
-                $ok = $ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
-                if ($ok -and $tcp.Connected) {
-                    return $Ip
-                }
-            }
-            catch { }
-            finally {
-                try { $tcp.Close() } catch { }
-            }
-        }
-        return $null
-    }
-
-    $maxRunspaces = [Math]::Min($Hosts.Count, 300)
-    $pool = [RunspaceFactory]::CreateRunspacePool(1, $maxRunspaces)
-    $pool.Open()
-
-    $handles = [System.Collections.Generic.List[object]]::new()
+    $entries = [System.Collections.Generic.List[object]]::new()
 
     foreach ($h in $Hosts) {
-        $ps = [PowerShell]::Create()
-        $ps.RunspacePool = $pool
-        [void]$ps.AddScript($tcpBlock).AddArgument($h).AddArgument($Ports).AddArgument($TimeoutMs)
-        $handles.Add([pscustomobject]@{ PS = $ps; Handle = $ps.BeginInvoke() })
+        $p = [System.Net.NetworkInformation.Ping]::new()
+        $entries.Add([pscustomobject]@{
+            Ip   = $h
+            Ping = $p
+            Task = $p.SendPingAsync($h, $TimeoutMs)
+        })
+    }
+
+    try {
+        [System.Threading.Tasks.Task]::WaitAll(($entries | ForEach-Object { $_.Task }))
+    }
+    catch {
+        # WaitAll throws AggregateException if any task faulted -- that is fine,
+        # we check individual results below.
     }
 
     $alive = [System.Collections.Generic.List[string]]::new()
-
-    foreach ($entry in $handles) {
+    foreach ($e in $entries) {
         try {
-            $res = $entry.PS.EndInvoke($entry.Handle)
-            if ($res -and $res[0]) {
-                [void]$alive.Add($res[0])
+            if ($e.Task.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion -and
+                $e.Task.Result.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                [void]$alive.Add($e.Ip)
             }
         }
         catch { }
         finally {
-            $entry.PS.Dispose()
+            try { $e.Ping.Dispose() } catch { }
         }
     }
-
-    $pool.Close()
-    $pool.Dispose()
 
     return $alive
 }
@@ -504,26 +486,19 @@ function Discover-Miner {
         return [pscustomobject]@{ Miner = $localMiner; Meta = $meta }
     }
 
-    # --- Parallel TCP port scan (no ICMP needed) ---
+    # --- Parallel ping sweep ---
     $allHosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway })
     $meta.total_hosts = $allHosts.Count
 
     Write-Host ""
-    Write-Log "INFO" "Scanning $($allHosts.Count) hosts on ports $($MinerPorts -join '/') ..."
+    Write-Log "INFO" "Pinging $($allHosts.Count) hosts in parallel ..."
 
-    $aliveHosts = @(Get-TcpAliveHosts -Hosts $allHosts -Ports $MinerPorts -TimeoutMs $TcpConnectTimeoutMs)
+    $aliveHosts = Get-AliveHosts -Hosts $allHosts -TimeoutMs $PingTimeoutMs
 
     $meta.alive_hosts = $aliveHosts.Count
+    Write-Log "INFO" "$($aliveHosts.Count) host(s) responded - probing for miner ..."
 
-    if ($aliveHosts.Count -eq 0) {
-        Write-Log "WARN" "No hosts with open miner ports found"
-        $meta.checked_hosts = 0
-        return [pscustomobject]@{ Miner = $null; Meta = $meta }
-    }
-
-    Write-Log "INFO" "$($aliveHosts.Count) host(s) with open ports - verifying miner ..."
-
-    # --- Full HTTP probe on hosts that had an open port ---
+    # --- Probe each alive host ---
     $checked = 0
     foreach ($candidate in $aliveHosts) {
         $checked++
@@ -545,6 +520,38 @@ try {
 
     $machineId = [guid]::NewGuid().ToString()
 
+    # ── RSA Key Pair Generation ──────────────────────────────
+    Write-Log "INFO" "Generating RSA key pair ..."
+    $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+
+    # Export private key → PKCS#1 DER → PEM
+    $privateKeyBytes = $rsa.ExportRSAPrivateKey()
+    $privateKeyB64   = [Convert]::ToBase64String($privateKeyBytes, [Base64FormattingOptions]::InsertLineBreaks)
+    $privateKeyPem   = "-----BEGIN RSA PRIVATE KEY-----`n$privateKeyB64`n-----END RSA PRIVATE KEY-----"
+    $privateKeyPath  = Join-Path $InstallDir "private_key.pem"
+    Set-Content -Path $privateKeyPath -Value $privateKeyPem -Encoding Ascii
+
+    # Lock down private key — owner read/write only
+    $acl = Get-Acl -Path $privateKeyPath
+    $acl.SetAccessRuleProtection($true, $false)   # disable inheritance, remove inherited rules
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
+        "FullControl",
+        "Allow"
+    )
+    $acl.SetAccessRule($rule)
+    Set-Acl -Path $privateKeyPath -AclObject $acl
+
+    # Export public key → PKCS#1 DER → PEM
+    $publicKeyBytes = $rsa.ExportSubjectPublicKeyInfo()
+    $publicKeyB64   = [Convert]::ToBase64String($publicKeyBytes, [Base64FormattingOptions]::InsertLineBreaks)
+    $publicKeyPem   = "-----BEGIN PUBLIC KEY-----`n$publicKeyB64`n-----END PUBLIC KEY-----"
+    $publicKeyPath  = Join-Path $InstallDir "public_key.pem"
+    Set-Content -Path $publicKeyPath -Value $publicKeyPem -Encoding Ascii
+
+    $rsa.Dispose()
+    Write-Log "OK" "RSA key pair saved to $InstallDir"
+
     Write-Host ""
     Write-Host "  ================================================" -ForegroundColor DarkCyan
     Write-Host "   RigWorkz Agent Installer" -ForegroundColor Cyan
@@ -563,7 +570,7 @@ try {
         Write-Log "OK"   "Miner found - $($miner.miner_ip):$($miner.miner_port) ($($miner.miner_type), auth: $($miner.auth_mode))"
     }
     else {
-        Write-Log "WARN" "No miner found on this network (scanned $($result.Meta.checked_hosts) hosts, $($result.Meta.alive_hosts) with open ports)"
+        Write-Log "WARN" "No miner found on this network (scanned $($result.Meta.checked_hosts) hosts, $($result.Meta.alive_hosts) alive)"
     }
 
     Write-Host ""
@@ -573,6 +580,7 @@ try {
         -Payload $Payload `
         -BackendUrl $BackendUrl `
         -MachineId $machineId `
+        -PublicKey ([Convert]::ToBase64String($publicKeyBytes)) `
         -Miner $miner `
         -Meta $result.Meta
 
