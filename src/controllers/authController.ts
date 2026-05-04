@@ -125,10 +125,10 @@ export const verifyWallet = async (req: Request, res: Response) => {
       { expiresIn: "1h" }
     );
 
-    const payload = JSON.stringify({ installToken, address });
-    const secretIT = process.env.PAYLOAD_SECRET || "my_secret";
-    const combined = secretIT + payload;
-    const encodedPayload = Buffer.from(combined).toString("base64");
+    // const payload = JSON.stringify({ installToken, address });
+    // const secretIT = process.env.PAYLOAD_SECRET || "my_secret";
+    // const combined = secretIT + payload;
+    // const encodedPayload = Buffer.from(combined).toString("base64");
 
     // const decoded = Buffer.from(encodedPayload, "base64").toString("utf8");
     // const secret = "my_secret";
@@ -140,7 +140,7 @@ export const verifyWallet = async (req: Request, res: Response) => {
     return res.json({
       success: true,
       token,
-      encodedPayload
+      installToken
     });
 
   } catch (error) {
@@ -152,23 +152,17 @@ export const verifyWallet = async (req: Request, res: Response) => {
 
 export const validateInstallToken = async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    const { installToken } = req.body;
+    if (!installToken) {
       return res.status(401).json({ message: "No token provided" });
     }
-    const token = authHeader.split(" ")[1];
-    const { address } = req.body; // or req.query / req.headers
 
-    if (!address) {
-      return res.status(400).json({ message: "Address is required" });
-    }
     const [rows]: any = await pool.query(
       `SELECT * FROM wallet_sessions 
-       WHERE install_token = ? 
-       AND address = ?
+       WHERE address = ?
        AND token_is_used = false 
        AND token_expires_at > ?`,
-      [token, address.toLowerCase(), Date.now()]
+      [installToken, Date.now()]
     );
     if (rows.length === 0) {
       return res.status(401).json({ message: "Invalid or expired token" });
@@ -178,7 +172,7 @@ export const validateInstallToken = async (req: Request, res: Response) => {
       `UPDATE wallet_sessions 
        SET token_is_used = true 
        WHERE install_token = ?`,
-      [token]
+      [installToken]
     );
 
     return res.json({ success: true });
