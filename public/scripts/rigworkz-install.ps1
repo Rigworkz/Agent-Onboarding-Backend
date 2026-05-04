@@ -216,6 +216,59 @@ function Build-DigestAuthHeader {
         $User, $realm, $nonce, $UriPath, $response)
 }
 
+# ── ASN.1 / DER Encoding Helpers ─────────────────────────────────────────────
+
+function ConvertTo-DerLength([int]$n) {
+    if ($n -lt 0x80)  { return [byte[]]@($n) }
+    if ($n -lt 0x100) { return [byte[]]@(0x81, $n) }
+    return [byte[]]@(0x82, ($n -shr 8), ($n -band 0xFF))
+}
+
+function ConvertTo-DerInteger([byte[]]$b) {
+    # Strip leading zeros (keep at least 1 byte)
+    $i = 0
+    while ($i -lt $b.Length - 1 -and $b[$i] -eq 0) { $i++ }
+    $b = $b[$i..($b.Length - 1)]
+    # Prepend 0x00 if high bit set → signals positive integer in DER
+    if ($b[0] -band 0x80) { $b = @([byte]0x00) + $b }
+    return @([byte]0x02) + (ConvertTo-DerLength $b.Length) + $b
+}
+
+function ConvertTo-DerSequence([byte[]]$b) {
+    return @([byte]0x30) + (ConvertTo-DerLength $b.Length) + $b
+}
+
+# Produces PKCS#1 PEM → compatible with Node crypto.privateDecrypt + RSA_PKCS1_PADDING
+function ConvertTo-Pkcs1PrivateKeyPem([System.Security.Cryptography.RSAParameters]$p) {
+    $der = ConvertTo-DerSequence (
+        [byte[]]@(0x02, 0x01, 0x00) +        # version = 0
+        (ConvertTo-DerInteger $p.Modulus)     +
+        (ConvertTo-DerInteger $p.Exponent)    +
+        (ConvertTo-DerInteger $p.D)           +
+        (ConvertTo-DerInteger $p.P)           +
+        (ConvertTo-DerInteger $p.Q)           +
+        (ConvertTo-DerInteger $p.DP)          +
+        (ConvertTo-DerInteger $p.DQ)          +
+        (ConvertTo-DerInteger $p.InverseQ)
+    )
+    $b64 = [Convert]::ToBase64String($der, [Base64FormattingOptions]::InsertLineBreaks)
+    return "-----BEGIN RSA PRIVATE KEY-----`n$b64`n-----END RSA PRIVATE KEY-----"
+}
+
+# Produces SPKI PEM → compatible with Node crypto.publicEncrypt
+function ConvertTo-SpkiPublicKey([System.Security.Cryptography.RSAParameters]$p) {
+    $rsaPub    = ConvertTo-DerSequence ((ConvertTo-DerInteger $p.Modulus) + (ConvertTo-DerInteger $p.Exponent))
+    $bitString = @([byte]0x03) + (ConvertTo-DerLength ($rsaPub.Length + 1)) + @([byte]0x00) + $rsaPub
+    # RSA OID: 1.2.840.113549.1.1.1
+    $oid       = [byte[]]@(0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00)
+    $algId     = ConvertTo-DerSequence $oid
+    $spkiDer   = ConvertTo-DerSequence ($algId + $bitString)
+    return @{
+        Pem    = "-----BEGIN PUBLIC KEY-----`n$([Convert]::ToBase64String($spkiDer, [Base64FormattingOptions]::InsertLineBreaks))`n-----END PUBLIC KEY-----"
+        Base64 = [Convert]::ToBase64String($spkiDer)   # clean Base64 DER → goes into config.json
+    }
+}
+
 $ProbeScript = {
     param(
         [string]$Ip,
@@ -520,37 +573,37 @@ try {
 
     $machineId = [guid]::NewGuid().ToString()
 
-    # ── RSA Key Pair Generation ──────────────────────────────
+    # ── RSA Key Pair Generation ───────────────────────────────────────────────
     Write-Log "INFO" "Generating RSA key pair ..."
-    $rsa = [System.Security.Cryptography.RSA]::Create(2048)
 
-    # Export private key → PKCS#1 DER → PEM
-    $privateKeyBytes = $rsa.ExportRSAPrivateKey()
-    $privateKeyB64   = [Convert]::ToBase64String($privateKeyBytes, [Base64FormattingOptions]::InsertLineBreaks)
-    $privateKeyPem   = "-----BEGIN RSA PRIVATE KEY-----`n$privateKeyB64`n-----END RSA PRIVATE KEY-----"
-    $privateKeyPath  = Join-Path $InstallDir "private_key.pem"
+    # RSACryptoServiceProvider works on ALL .NET versions (Framework 2.0+, Core, PS5, PS7)
+    $rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048)
+    try {
+        $rsaParams     = $rsa.ExportParameters($true)      # true = include private key
+        $privateKeyPem = ConvertTo-Pkcs1PrivateKeyPem -p $rsaParams
+        $pubKey        = ConvertTo-SpkiPublicKey       -p $rsaParams
+        $publicKeyPem  = $pubKey.Pem
+        $publicKeyB64  = $pubKey.Base64                    # stored in config.json
+    }
+    finally {
+        $rsa.Dispose()
+    }
+
+    # Save private key — locked to current user only
+    $privateKeyPath = Join-Path $InstallDir "private_key.pem"
     Set-Content -Path $privateKeyPath -Value $privateKeyPem -Encoding Ascii
+    $acl = Get-Acl $privateKeyPath
+    $acl.SetAccessRuleProtection($true, $false)    # disable inheritance, clear inherited rules
+    $acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, "FullControl", "Allow"
+    )))
+    Set-Acl $privateKeyPath $acl
 
-    # Lock down private key — owner read/write only
-    $acl = Get-Acl -Path $privateKeyPath
-    $acl.SetAccessRuleProtection($true, $false)   # disable inheritance, remove inherited rules
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-        [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
-        "FullControl",
-        "Allow"
-    )
-    $acl.SetAccessRule($rule)
-    Set-Acl -Path $privateKeyPath -AclObject $acl
+    # Save public key (readable, safe to share)
+    Set-Content -Path (Join-Path $InstallDir "public_key.pem") -Value $publicKeyPem -Encoding Ascii
 
-    # Export public key → PKCS#1 DER → PEM
-    $publicKeyBytes = $rsa.ExportSubjectPublicKeyInfo()
-    $publicKeyB64   = [Convert]::ToBase64String($publicKeyBytes, [Base64FormattingOptions]::InsertLineBreaks)
-    $publicKeyPem   = "-----BEGIN PUBLIC KEY-----`n$publicKeyB64`n-----END PUBLIC KEY-----"
-    $publicKeyPath  = Join-Path $InstallDir "public_key.pem"
-    Set-Content -Path $publicKeyPath -Value $publicKeyPem -Encoding Ascii
-
-    $rsa.Dispose()
-    Write-Log "OK" "RSA key pair saved to $InstallDir"
+    Write-Log "OK" "RSA key pair generated"
+    # ─────────────────────────────────────────────────────────────────────────
 
     Write-Host ""
     Write-Host "  ================================================" -ForegroundColor DarkCyan
@@ -580,7 +633,7 @@ try {
         -Payload $Payload `
         -BackendUrl $BackendUrl `
         -MachineId $machineId `
-        -PublicKey ([Convert]::ToBase64String($publicKeyBytes)) `
+        -PublicKey $publicKeyB64 `
         -Miner $miner `
         -Meta $result.Meta
 
