@@ -568,6 +568,39 @@ try {
 
     Write-Log "OK" "RSA key pair ready"
 
+    # ── Register Machine ─────────────────────────────────────────────────────
+    Write-Log "INFO" "Registering machine with backend ..."
+    try {
+        $decoded      = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload))
+        $installToken = ($decoded | ConvertFrom-Json).installToken
+
+        if (-not $installToken) { throw "installToken missing from payload" }
+
+        $registerBody = @{
+            installToken = $installToken
+            machineId    = $machineId
+            publicKey    = $publicKeyPem
+        } | ConvertTo-Json
+
+        $registerResponse = Invoke-WebRequest `
+            -Uri         "$BackendUrl/api/register" `
+            -Method      POST `
+            -Body        $registerBody `
+            -ContentType "application/json" `
+            -UseBasicParsing `
+            -ErrorAction Stop
+
+        $registerResult = $registerResponse.Content | ConvertFrom-Json
+        if ($registerResult.success -ne $true) { throw "Backend rejected registration" }
+
+        Write-Log "OK" "Machine registered"
+    }
+    catch {
+        Write-Log "ERR" "Registration failed: $($_.Exception.Message)"
+        exit 1
+    }
+    # ─────────────────────────────────────────────────────────────────────────
+
     Write-Host ""
     Write-Host "  ================================================" -ForegroundColor DarkCyan
     Write-Host "   RigWorkz Agent Installer" -ForegroundColor Cyan

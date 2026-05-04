@@ -261,10 +261,66 @@ async function poll() {
   }
 }
 
+// ─── Fetch & Decrypt Wallet Address ─────────────────────────────────────────
+async function fetchWalletAddress() {
+  const config = loadConfig();
+  const machineId = config.machine_id;
+
+  if (!machineId) {
+    throw new Error("machine_id missing from config");
+  }
+
+  const privateKeyPath = path.join(__dirname, "private_key.pem");
+  if (!fs.existsSync(privateKeyPath)) {
+    throw new Error("private_key.pem not found");
+  }
+  const privateKey = fs.readFileSync(privateKeyPath, "utf8");
+
+  const url = new URL(
+    `/api/encrypted-address?machineId=${encodeURIComponent(machineId)}`,
+    backendUrl,
+  );
+
+  const response = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 5000,
+        path: url.pathname + url.search,
+        method: "GET",
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (c) => (data += c));
+        res.on("end", () => resolve(data));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+
+  const parsed = JSON.parse(response);
+  if (!parsed.success || !parsed.encryptedAddress) {
+    throw new Error(parsed.message || "No encrypted address returned");
+  }
+
+  const decryptedBuf = crypto.privateDecrypt(
+    { key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING },
+    Buffer.from(parsed.encryptedAddress, "base64"),
+  );
+
+  global.operatorWallet = decryptedBuf.toString("utf8");
+  log("INFO", `Wallet address decrypted successfully`);
+}
+
 // ─── Start ──────────────────────────────────────────────
 async function start() {
   log("INFO", "Mock agent starting...");
 
+  // Step 1 — securely fetch wallet address via RSA decryption
+  await fetchWalletAddress();
+
+  // Step 2 — verify installation
   await verifyWallet();
 
   await poll();
