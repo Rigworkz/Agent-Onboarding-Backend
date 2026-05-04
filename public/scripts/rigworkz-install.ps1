@@ -592,12 +592,7 @@ try {
     # Save private key — locked to current user only
     $privateKeyPath = Join-Path $InstallDir "private_key.pem"
     Set-Content -Path $privateKeyPath -Value $privateKeyPem -Encoding Ascii
-    $acl = Get-Acl $privateKeyPath
-    $acl.SetAccessRuleProtection($true, $false)    # disable inheritance, clear inherited rules
-    $acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-        [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, "FullControl", "Allow"
-    )))
-    Set-Acl $privateKeyPath $acl
+    icacls $privateKeyPath /inheritance:r /grant:r "${env:USERNAME}:F" 2>$null | Out-Null
 
     # Save public key (readable, safe to share)
     Set-Content -Path (Join-Path $InstallDir "public_key.pem") -Value $publicKeyPem -Encoding Ascii
