@@ -6,7 +6,7 @@ param(
     [string]$InstallDir = "C:\rigworkz-agent",
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
-    [int]$PingTimeoutMs = 500,
+    [int]$TcpConnectTimeoutMs = 400,
     [int]$EndpointTimeoutSec = 10,
     [int[]]$MinerPorts = @(80, 8080, 4028, 8888)
 )
@@ -146,7 +146,7 @@ function Save-DiscoveryResult {
         miner_ip   = if ($Miner) { $Miner.miner_ip } else { $null }
         miner_port = if ($Miner) { $Miner.miner_port } else { $null }
         discovery  = @{
-            method        = "local-first + subnet-scan"
+            method        = "local-first + tcp-scan"
             status        = if ($Miner) { "found" } else { "not_found" }
             scanned_at    = (Get-Date).ToString("o")
             miner_type    = if ($Miner) { $Miner.miner_type } else { $null }
@@ -216,7 +216,7 @@ function Build-DigestAuthHeader {
         $User, $realm, $nonce, $UriPath, $response)
 }
 
-# ── ASN.1 / DER Encoding Helpers ─────────────────────────────────────────────
+# DER/ASN.1 helpers for RSA key export
 
 function ConvertTo-DerLength([int]$n) {
     if ($n -lt 0x80)  { return [byte[]]@($n) }
@@ -225,11 +225,9 @@ function ConvertTo-DerLength([int]$n) {
 }
 
 function ConvertTo-DerInteger([byte[]]$b) {
-    # Strip leading zeros (keep at least 1 byte)
     $i = 0
     while ($i -lt $b.Length - 1 -and $b[$i] -eq 0) { $i++ }
     $b = $b[$i..($b.Length - 1)]
-    # Prepend 0x00 if high bit set → signals positive integer in DER
     if ($b[0] -band 0x80) { $b = @([byte]0x00) + $b }
     return @([byte]0x02) + (ConvertTo-DerLength $b.Length) + $b
 }
@@ -238,34 +236,31 @@ function ConvertTo-DerSequence([byte[]]$b) {
     return @([byte]0x30) + (ConvertTo-DerLength $b.Length) + $b
 }
 
-# Produces PKCS#1 PEM → compatible with Node crypto.privateDecrypt + RSA_PKCS1_PADDING
 function ConvertTo-Pkcs1PrivateKeyPem([System.Security.Cryptography.RSAParameters]$p) {
     $der = ConvertTo-DerSequence (
-        [byte[]]@(0x02, 0x01, 0x00) +        # version = 0
-        (ConvertTo-DerInteger $p.Modulus)     +
-        (ConvertTo-DerInteger $p.Exponent)    +
-        (ConvertTo-DerInteger $p.D)           +
-        (ConvertTo-DerInteger $p.P)           +
-        (ConvertTo-DerInteger $p.Q)           +
-        (ConvertTo-DerInteger $p.DP)          +
-        (ConvertTo-DerInteger $p.DQ)          +
+        [byte[]]@(0x02, 0x01, 0x00) +
+        (ConvertTo-DerInteger $p.Modulus)  +
+        (ConvertTo-DerInteger $p.Exponent) +
+        (ConvertTo-DerInteger $p.D)        +
+        (ConvertTo-DerInteger $p.P)        +
+        (ConvertTo-DerInteger $p.Q)        +
+        (ConvertTo-DerInteger $p.DP)       +
+        (ConvertTo-DerInteger $p.DQ)       +
         (ConvertTo-DerInteger $p.InverseQ)
     )
     $b64 = [Convert]::ToBase64String($der, [Base64FormattingOptions]::InsertLineBreaks)
     return "-----BEGIN RSA PRIVATE KEY-----`n$b64`n-----END RSA PRIVATE KEY-----"
 }
 
-# Produces SPKI PEM → compatible with Node crypto.publicEncrypt
 function ConvertTo-SpkiPublicKey([System.Security.Cryptography.RSAParameters]$p) {
     $rsaPub    = ConvertTo-DerSequence ((ConvertTo-DerInteger $p.Modulus) + (ConvertTo-DerInteger $p.Exponent))
     $bitString = @([byte]0x03) + (ConvertTo-DerLength ($rsaPub.Length + 1)) + @([byte]0x00) + $rsaPub
-    # RSA OID: 1.2.840.113549.1.1.1
     $oid       = [byte[]]@(0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00)
     $algId     = ConvertTo-DerSequence $oid
     $spkiDer   = ConvertTo-DerSequence ($algId + $bitString)
     return @{
         Pem    = "-----BEGIN PUBLIC KEY-----`n$([Convert]::ToBase64String($spkiDer, [Base64FormattingOptions]::InsertLineBreaks))`n-----END PUBLIC KEY-----"
-        Base64 = [Convert]::ToBase64String($spkiDer)   # clean Base64 DER → goes into config.json
+        Base64 = [Convert]::ToBase64String($spkiDer)
     }
 }
 
@@ -280,21 +275,17 @@ $ProbeScript = {
 
     function Get-Md5Hex {
         param([string]$Text)
-
         $md5 = [System.Security.Cryptography.MD5]::Create()
         try {
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
             $hash = $md5.ComputeHash($bytes)
             return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
         }
-        finally {
-            $md5.Dispose()
-        }
+        finally { $md5.Dispose() }
     }
 
     function Parse-AuthChallenge {
         param([string]$Header)
-
         $out = @{}
         foreach ($m in [regex]::Matches($Header, '(\w+)=(?:"([^"]+)"|([^\s,]+))')) {
             $out[$m.Groups[1].Value] = if ($m.Groups[2].Value) { $m.Groups[2].Value } else { $m.Groups[3].Value }
@@ -303,37 +294,26 @@ $ProbeScript = {
     }
 
     function Build-DigestAuthHeader {
-        param(
-            [string]$Method,
-            [string]$UriPath,
-            [hashtable]$Challenge,
-            [string]$User,
-            [string]$Pass
-        )
-
+        param([string]$Method, [string]$UriPath, [hashtable]$Challenge, [string]$User, [string]$Pass)
         $realm = $Challenge.realm
         $nonce = $Challenge.nonce
-        $qop = $Challenge.qop
-
-        $ha1 = Get-Md5Hex "$User`:$realm`:$Pass"
-        $ha2 = Get-Md5Hex "$Method`:$UriPath"
-
+        $qop   = $Challenge.qop
+        $ha1   = Get-Md5Hex "$User`:$realm`:$Pass"
+        $ha2   = Get-Md5Hex "$Method`:$UriPath"
         if ($qop -and $qop -like "*auth*") {
-            $nc = "00000001"
+            $nc     = "00000001"
             $cnonce = ([guid]::NewGuid().ToString("N")).Substring(0, 16)
-            $response = Get-Md5Hex "$ha1`:$nonce`:$nc`:$cnonce`:auth`:$ha2"
-
+            $resp   = Get-Md5Hex "$ha1`:$nonce`:$nc`:$cnonce`:auth`:$ha2"
             return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", qop=auth, nc={4}, cnonce="{5}", response="{6}"' -f `
-                $User, $realm, $nonce, $UriPath, $nc, $cnonce, $response)
+                $User, $realm, $nonce, $UriPath, $nc, $cnonce, $resp)
         }
-
-        $response = Get-Md5Hex "$ha1`:$nonce`:$ha2"
+        $resp = Get-Md5Hex "$ha1`:$nonce`:$ha2"
         return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}"' -f `
-            $User, $realm, $nonce, $UriPath, $response)
+            $User, $realm, $nonce, $UriPath, $resp)
     }
 
     $uriPath = "/cgi-bin/stats.cgi"
-    $url = "http://$Ip`:$Port$uriPath"
+    $url     = "http://$Ip`:$Port$uriPath"
 
     try {
         $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
@@ -341,7 +321,9 @@ $ProbeScript = {
             try {
                 $json = $res.Content | ConvertFrom-Json -ErrorAction Stop
                 if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
-                    $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } else { "unknown" }
+                    $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } `
+                                 elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } `
+                                 else { "unknown" }
                     return [pscustomobject]@{
                         miner_ip   = $Ip
                         miner_port = $Port
@@ -350,8 +332,7 @@ $ProbeScript = {
                     }
                 }
             }
-            catch {
-            }
+            catch {}
         }
     }
     catch {
@@ -360,14 +341,16 @@ $ProbeScript = {
             $header = $resp.Headers["WWW-Authenticate"]
             if ($header) {
                 try {
-                    $ch = Parse-AuthChallenge -Header $header
+                    $ch      = Parse-AuthChallenge -Header $header
                     $authHdr = Build-DigestAuthHeader -Method "GET" -UriPath $uriPath -Challenge $ch -User $MinerUser -Pass $MinerPass
-
-                    $authed = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $authHdr } -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
+                    $authed  = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $authHdr } `
+                                 -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
                     if ($authed.StatusCode -eq 200) {
                         $json = $authed.Content | ConvertFrom-Json -ErrorAction Stop
                         if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
-                            $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } else { "unknown" }
+                            $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } `
+                                         elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } `
+                                         else { "unknown" }
                             return [pscustomobject]@{
                                 miner_ip   = $Ip
                                 miner_port = $Port
@@ -377,8 +360,7 @@ $ProbeScript = {
                         }
                     }
                 }
-                catch {
-                }
+                catch {}
             }
         }
     }
@@ -387,35 +369,21 @@ $ProbeScript = {
 }
 
 function Get-OrderedPorts {
-    param(
-        [int]$PreferredPort = 0,
-        [int[]]$Ports
-    )
+    param([int]$PreferredPort = 0, [int[]]$Ports)
 
     $ordered = New-Object System.Collections.Generic.List[int]
-
-    if ($PreferredPort -gt 0) {
-        [void]$ordered.Add($PreferredPort)
-    }
-
+    if ($PreferredPort -gt 0) { [void]$ordered.Add($PreferredPort) }
     foreach ($p in $Ports) {
-        if ($p -gt 0 -and -not $ordered.Contains($p)) {
-            [void]$ordered.Add($p)
-        }
+        if ($p -gt 0 -and -not $ordered.Contains($p)) { [void]$ordered.Add($p) }
     }
-
     return ,$ordered.ToArray()
 }
 
 function Test-MinerEndpoint {
-    param(
-        [string]$Ip,
-        [int]$PreferredPort = 0
-    )
+    param([string]$Ip, [int]$PreferredPort = 0)
 
     $ports = Get-OrderedPorts -PreferredPort $PreferredPort -Ports $MinerPorts
-
-    $jobs = @()
+    $jobs  = @()
     foreach ($port in $ports) {
         $jobs += Start-Job -ScriptBlock $ProbeScript -ArgumentList $Ip, $port, $EndpointTimeoutSec, $MinerUser, $MinerPass
     }
@@ -423,22 +391,15 @@ function Test-MinerEndpoint {
     try {
         while ($jobs.Count -gt 0) {
             $completedJobs = @(Wait-Job -Job $jobs -Any)
-
             foreach ($completedJob in $completedJobs) {
                 $result = $null
-                try {
-                    $result = Receive-Job -Job $completedJob -ErrorAction SilentlyContinue
-                }
-                catch {
-                }
-
+                try { $result = Receive-Job -Job $completedJob -ErrorAction SilentlyContinue } catch {}
                 Remove-Job -Job $completedJob -Force -ErrorAction SilentlyContinue
                 $jobs = @($jobs | Where-Object { $_.Id -ne $completedJob.Id })
-
                 if ($result) {
-                    foreach ($otherJob in $jobs) {
-                        Stop-Job -Job $otherJob -ErrorAction SilentlyContinue
-                        Remove-Job -Job $otherJob -Force -ErrorAction SilentlyContinue
+                    foreach ($j in $jobs) {
+                        Stop-Job -Job $j -ErrorAction SilentlyContinue
+                        Remove-Job -Job $j -Force -ErrorAction SilentlyContinue
                     }
                     return $result
                 }
@@ -446,54 +407,59 @@ function Test-MinerEndpoint {
         }
     }
     finally {
-        foreach ($job in $jobs) {
-            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-        }
+        foreach ($j in $jobs) { Remove-Job -Job $j -Force -ErrorAction SilentlyContinue }
     }
 
     return $null
 }
 
-# Pings all hosts simultaneously using async .NET API.
-# Returns a list of IPs that responded, sorted by how fast they replied.
-function Get-AliveHosts {
-    param(
-        [string[]]$Hosts,
-        [int]$TimeoutMs
-    )
+# Parallel TCP connect scan via RunspacePool.
+# No ICMP used -- works even when ping is blocked by the device or router.
+# Each host is tested on all miner ports; first successful TCP handshake marks it alive.
+function Get-TcpAliveHosts {
+    param([string[]]$Hosts, [int[]]$Ports, [int]$TimeoutMs)
 
-    $entries = [System.Collections.Generic.List[object]]::new()
+    $tcpBlock = {
+        param([string]$Ip, [int[]]$Ports, [int]$TimeoutMs)
+        foreach ($port in $Ports) {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            try {
+                $ar = $tcp.BeginConnect($Ip, $port, $null, $null)
+                if ($ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false) -and $tcp.Connected) {
+                    return $Ip
+                }
+            }
+            catch {}
+            finally {
+                try { $tcp.Close() } catch {}
+            }
+        }
+        return $null
+    }
 
+    $pool = [RunspaceFactory]::CreateRunspacePool(1, [Math]::Min($Hosts.Count, 300))
+    $pool.Open()
+
+    $handles = [System.Collections.Generic.List[object]]::new()
     foreach ($h in $Hosts) {
-        $p = [System.Net.NetworkInformation.Ping]::new()
-        $entries.Add([pscustomobject]@{
-            Ip   = $h
-            Ping = $p
-            Task = $p.SendPingAsync($h, $TimeoutMs)
-        })
-    }
-
-    try {
-        [System.Threading.Tasks.Task]::WaitAll(($entries | ForEach-Object { $_.Task }))
-    }
-    catch {
-        # WaitAll throws AggregateException if any task faulted -- that is fine,
-        # we check individual results below.
+        $ps = [PowerShell]::Create()
+        $ps.RunspacePool = $pool
+        [void]$ps.AddScript($tcpBlock).AddArgument($h).AddArgument($Ports).AddArgument($TimeoutMs)
+        $handles.Add([pscustomobject]@{ PS = $ps; Handle = $ps.BeginInvoke() })
     }
 
     $alive = [System.Collections.Generic.List[string]]::new()
-    foreach ($e in $entries) {
+    foreach ($entry in $handles) {
         try {
-            if ($e.Task.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion -and
-                $e.Task.Result.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
-                [void]$alive.Add($e.Ip)
-            }
+            $res = $entry.PS.EndInvoke($entry.Handle)
+            if ($res -and $res[0]) { [void]$alive.Add($res[0]) }
         }
-        catch { }
-        finally {
-            try { $e.Ping.Dispose() } catch { }
-        }
+        catch {}
+        finally { $entry.PS.Dispose() }
     }
+
+    $pool.Close()
+    $pool.Dispose()
 
     return $alive
 }
@@ -501,9 +467,9 @@ function Get-AliveHosts {
 function Discover-Miner {
     param([string]$InstallDir)
 
-    $cfg = Get-PrimaryIPv4Config
-    $ip = $cfg.IPv4Address.IPAddress
-    $prefix = $cfg.IPv4Address.PrefixLength
+    $cfg     = Get-PrimaryIPv4Config
+    $ip      = $cfg.IPv4Address.IPAddress
+    $prefix  = $cfg.IPv4Address.PrefixLength
     $gateway = $cfg.IPv4DefaultGateway.NextHop
 
     Write-Log "INFO" "Adapter    : $($cfg.InterfaceAlias)"
@@ -519,19 +485,19 @@ function Discover-Miner {
         alive_hosts   = 0
     }
 
-    # --- Check cache first ---
+    # Check cache first
     $cached = Get-CachedDiscovery -InstallDir $InstallDir
     if ($cached -and $cached.miner_ip) {
         Write-Log "INFO" "Trying last known miner at $($cached.miner_ip):$($cached.miner_port) ..."
         $cachedMiner = Test-MinerEndpoint -Ip $cached.miner_ip -PreferredPort ([int]($cached.miner_port))
         if ($cachedMiner) {
-            Write-Log "OK"   "Miner still reachable - skipping scan"
+            Write-Log "OK" "Miner still reachable - skipping scan"
             return [pscustomobject]@{ Miner = $cachedMiner; Meta = $meta }
         }
         Write-Log "WARN" "Cached miner not responding, moving on"
     }
 
-    # --- Try local IP before scanning ---
+    # Try local IP first
     Write-Log "INFO" "Checking local machine (ports $($MinerPorts -join ' / ')) ..."
     $localMiner = Test-MinerEndpoint -Ip $ip -PreferredPort 8080
     if ($localMiner) {
@@ -539,19 +505,24 @@ function Discover-Miner {
         return [pscustomobject]@{ Miner = $localMiner; Meta = $meta }
     }
 
-    # --- Parallel ping sweep ---
+    # Parallel TCP scan across subnet
     $allHosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway })
     $meta.total_hosts = $allHosts.Count
 
     Write-Host ""
-    Write-Log "INFO" "Pinging $($allHosts.Count) hosts in parallel ..."
+    Write-Log "INFO" "Scanning $($allHosts.Count) hosts on ports $($MinerPorts -join '/') ..."
 
-    $aliveHosts = Get-AliveHosts -Hosts $allHosts -TimeoutMs $PingTimeoutMs
-
+    $aliveHosts = @(Get-TcpAliveHosts -Hosts $allHosts -Ports $MinerPorts -TimeoutMs $TcpConnectTimeoutMs)
     $meta.alive_hosts = $aliveHosts.Count
-    Write-Log "INFO" "$($aliveHosts.Count) host(s) responded - probing for miner ..."
 
-    # --- Probe each alive host ---
+    if ($aliveHosts.Count -eq 0) {
+        Write-Log "WARN" "No hosts with open miner ports found"
+        $meta.checked_hosts = 0
+        return [pscustomobject]@{ Miner = $null; Meta = $meta }
+    }
+
+    Write-Log "INFO" "$($aliveHosts.Count) host(s) with open ports - verifying miner ..."
+
     $checked = 0
     foreach ($candidate in $aliveHosts) {
         $checked++
@@ -573,32 +544,29 @@ try {
 
     $machineId = [guid]::NewGuid().ToString()
 
-    # ── RSA Key Pair Generation ───────────────────────────────────────────────
+    # RSA Key Pair
     Write-Log "INFO" "Generating RSA key pair ..."
 
-    # RSACryptoServiceProvider works on ALL .NET versions (Framework 2.0+, Core, PS5, PS7)
     $rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048)
     try {
-        $rsaParams     = $rsa.ExportParameters($true)      # true = include private key
+        $rsaParams     = $rsa.ExportParameters($true)
         $privateKeyPem = ConvertTo-Pkcs1PrivateKeyPem -p $rsaParams
-        $pubKey        = ConvertTo-SpkiPublicKey       -p $rsaParams
+        $pubKey        = ConvertTo-SpkiPublicKey -p $rsaParams
         $publicKeyPem  = $pubKey.Pem
-        $publicKeyB64  = $pubKey.Base64                    # stored in config.json
+        $publicKeyB64  = $pubKey.Base64
     }
     finally {
         $rsa.Dispose()
     }
 
-    # Save private key — locked to current user only
     $privateKeyPath = Join-Path $InstallDir "private_key.pem"
     Set-Content -Path $privateKeyPath -Value $privateKeyPem -Encoding Ascii
+    # Use icacls instead of Set-Acl -- no SeSecurityPrivilege required
     icacls $privateKeyPath /inheritance:r /grant:r "${env:USERNAME}:F" 2>$null | Out-Null
 
-    # Save public key (readable, safe to share)
     Set-Content -Path (Join-Path $InstallDir "public_key.pem") -Value $publicKeyPem -Encoding Ascii
 
-    Write-Log "OK" "RSA key pair generated"
-    # ─────────────────────────────────────────────────────────────────────────
+    Write-Log "OK" "RSA key pair ready"
 
     Write-Host ""
     Write-Host "  ================================================" -ForegroundColor DarkCyan
@@ -610,7 +578,7 @@ try {
     Write-Host ""
 
     $result = Discover-Miner -InstallDir $InstallDir
-    $miner = $result.Miner
+    $miner  = $result.Miner
 
     Write-Host ""
 
@@ -618,19 +586,19 @@ try {
         Write-Log "OK"   "Miner found - $($miner.miner_ip):$($miner.miner_port) ($($miner.miner_type), auth: $($miner.auth_mode))"
     }
     else {
-        Write-Log "WARN" "No miner found on this network (scanned $($result.Meta.checked_hosts) hosts, $($result.Meta.alive_hosts) alive)"
+        Write-Log "WARN" "No miner found on this network (scanned $($result.Meta.checked_hosts) hosts, $($result.Meta.alive_hosts) with open ports)"
     }
 
     Write-Host ""
     Write-Log "INFO" "Saving config ..."
     Save-DiscoveryResult `
         -InstallDir $InstallDir `
-        -Payload $Payload `
+        -Payload    $Payload `
         -BackendUrl $BackendUrl `
-        -MachineId $machineId `
-        -PublicKey $publicKeyB64 `
-        -Miner $miner `
-        -Meta $result.Meta
+        -MachineId  $machineId `
+        -PublicKey  $publicKeyB64 `
+        -Miner      $miner `
+        -Meta       $result.Meta
 
     Write-Log "INFO" "Downloading agent ..."
     $agentDest = Join-Path $InstallDir "agent.js"
