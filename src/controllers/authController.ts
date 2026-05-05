@@ -22,7 +22,7 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import { ethers } from "ethers";
-import { pool } from '../config/database';
+import { pool } from "../config/database";
 
 const sessions = new Map<string, any>();
 
@@ -40,22 +40,21 @@ export const login = (req: Request, res: Response) => {
   return res.json({ token });
 };
 
-
 export const getNonce = async (req: Request, res: Response) => {
   try {
     const { address } = req.query;
-    if (!address || typeof address !== 'string') {
-      return res.status(400).json({ message: 'Address is required' });
+    if (!address || typeof address !== "string") {
+      return res.status(400).json({ message: "Address is required" });
     }
     const normalizedAddress = address.toLowerCase();
-    const nonce = crypto.randomBytes(16).toString('hex');
+    const nonce = crypto.randomBytes(16).toString("hex");
     const sessionId = uuidv4();
     const timestamp = Date.now();
     const connection = await pool.getConnection();
     // Remove any old unused sessions for this address
     await connection.query(
-      'DELETE FROM wallet_sessions WHERE address = ? AND is_verified = false',
-      [normalizedAddress]
+      "DELETE FROM wallet_sessions WHERE address = ? AND is_verified = false",
+      [normalizedAddress],
     );
     // Insert new session into the database
     try {
@@ -63,9 +62,8 @@ export const getNonce = async (req: Request, res: Response) => {
         `INSERT INTO wallet_sessions 
         (address, session_id, nonce, timestamp, is_verified) 
         VALUES (?, ?, ?, ?, false)`,
-        [normalizedAddress, sessionId, nonce, timestamp]
+        [normalizedAddress, sessionId, nonce, timestamp],
       );
-
     } catch (err) {
       console.error("Insert failed", err);
     }
@@ -73,11 +71,10 @@ export const getNonce = async (req: Request, res: Response) => {
     // Return nonce and session ID to frontend
     return res.json({ nonce, sessionId, timestamp });
   } catch (error) {
-    console.error('Nonce error:', error);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("Nonce error:", error);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
-
 
 export const verifyWallet = async (req: Request, res: Response) => {
   try {
@@ -85,7 +82,7 @@ export const verifyWallet = async (req: Request, res: Response) => {
     // 1. Fetch session from DB
     const [rows]: any = await pool.query(
       `SELECT * FROM wallet_sessions WHERE session_id = ? AND address = ?`,
-      [sessionId, address]
+      [sessionId, address],
     );
     if (rows.length === 0) {
       return res.status(400).json({ message: "Invalid session" });
@@ -94,7 +91,7 @@ export const verifyWallet = async (req: Request, res: Response) => {
     // 2. Recreate message
     const message = `Welcome to RigWorkZ Wallet: ${address} Nonce: ${session.nonce} Timestamp: ${session.timestamp}`;
 
-    // 3. Verify signature 
+    // 3. Verify signature
     const recoveredAddress = ethers.verifyMessage(message, signature);
     if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
       return res.status(400).json({ message: "Invalid signature" });
@@ -102,7 +99,7 @@ export const verifyWallet = async (req: Request, res: Response) => {
     // 4. Mark session verified
     await pool.query(
       `UPDATE wallet_sessions SET is_verified = true WHERE session_id = ?`,
-      [sessionId]
+      [sessionId],
     );
     //  5. GENERATE JWT HERE
     const secret = process.env.JWT_SECRET || "your_jwt_secret";
@@ -116,14 +113,12 @@ export const verifyWallet = async (req: Request, res: Response) => {
           token_expires_at = ?,
           signature = ?
       WHERE session_id = ?`,
-      [installToken, expiresAt, signature, sessionId]
+      [installToken, expiresAt, signature, sessionId],
     );
 
-    const token = jwt.sign(
-      { operator_wallet: address },
-      secret,
-      { expiresIn: "1h" }
-    );
+    const token = jwt.sign({ operator_wallet: address }, secret, {
+      expiresIn: "1h",
+    });
 
     // const payload = JSON.stringify({ installToken, address });
     // const secretIT = process.env.PAYLOAD_SECRET || "my_secret";
@@ -140,15 +135,13 @@ export const verifyWallet = async (req: Request, res: Response) => {
     return res.json({
       success: true,
       token,
-      installToken
+      installToken,
     });
-
   } catch (error) {
     console.error("Verify error:", error);
     return res.status(500).json({ message: "Internal server error" });
   }
 };
-
 
 export const validateInstallToken = async (req: Request, res: Response) => {
   try {
@@ -159,10 +152,10 @@ export const validateInstallToken = async (req: Request, res: Response) => {
 
     const [rows]: any = await pool.query(
       `SELECT * FROM wallet_sessions 
-       WHERE address = ?
+       WHERE install_token = ?
        AND token_is_used = false 
        AND token_expires_at > ?`,
-      [installToken, Date.now()]
+      [installToken, Date.now()],
     );
     if (rows.length === 0) {
       return res.status(401).json({ message: "Invalid or expired token" });
@@ -172,11 +165,10 @@ export const validateInstallToken = async (req: Request, res: Response) => {
       `UPDATE wallet_sessions 
        SET token_is_used = true 
        WHERE install_token = ?`,
-      [installToken]
+      [installToken],
     );
 
     return res.json({ success: true });
-
   } catch (error) {
     console.error("Token validation error:", error);
     return res.status(500).json({ message: "Internal server error" });
