@@ -264,6 +264,7 @@ async function poll() {
 // ─── Fetch & Decrypt Wallet Address ─────────────────────────────────────────
 async function fetchWalletAddress() {
   const config = loadConfig();
+  backendUrl = config.backendUrl || backendUrl; // ← add this line
   const machineId = config.machine_id;
 
   if (!machineId) {
