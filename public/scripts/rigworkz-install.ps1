@@ -643,7 +643,7 @@ try {
     }
 
     Write-Log "INFO" "Launching agent process ..."
-    Start-Process -FilePath "node" -ArgumentList "`"$agentDest`"" -WorkingDirectory $InstallDir -NoNewWindow
+    Start-Process -FilePath "node" -ArgumentList "`"$agentDest`"" -WorkingDirectory $InstallDir
 
     Write-Host ""
     Write-Log "OK"  "Agent is running. All done."

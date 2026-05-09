@@ -23,6 +23,10 @@ let verificationMessage = "Pending";
 let backendUrl = "http://localhost:3001"; // overwritten by config on startup
 let lastHeartbeatAt = null;
 
+// Module-scope timer reference so the shutdown handler can clear it
+// regardless of which lifecycle stage we were in when the signal arrived.
+let pollTimer = null;
+
 // ─── Logger ──────────────────────────────────────────────────────────────────
 function log(level, msg) {
   const line = `[${new Date().toISOString()}] [${level}] ${msg}`;
@@ -388,14 +392,12 @@ async function poll() {
     const minerPort = config.miner_port || 80;
     const discoveryStatus = config.discovery?.status || "unknown";
 
-    // Guard: installer sets miner_ip to null when no miner was found on the LAN.
     if (!minerHost) {
       throw new Error(
         "miner_ip is not set in config.json — miner was not discovered",
       );
     }
 
-    // ── Fetch live stats from real miner ──────────────────────────────────────
     const raw = await digestGet(minerHost, minerPort, "/cgi-bin/stats.cgi");
 
     let data;
@@ -410,7 +412,6 @@ async function poll() {
       throw new Error("No STATS[0] in response — unexpected firmware format");
     }
 
-    // Rate fallback chain: rate_avg → rate_30m → rate_5s (mirrors original script)
     const hashrate_ghs = stats.rate_avg ?? stats.rate_30m ?? stats.rate_5s ?? 0;
 
     const chains = stats.chain ?? [];
@@ -429,26 +430,19 @@ async function poll() {
       max_chip_temp: maxTemp,
     };
 
-    // ── Status detection (RESTORED to original semantics) ─────────────────────
-    // The original production agent treated "reachable miner with positive
-    // hashrate" as ONLINE and everything else (including a reachable miner
-    // reporting zero hashrate, e.g. stalled chips) as OFFLINE. The previous
-    // gap-based heuristic effectively reported ONLINE on every successful
-    // poll because POLL_INTERVAL_MS (30s) is well under its 60s threshold,
-    // which masks chip failures. Reverting to the proven test.
+    // Status mirrors the original production agent: a reachable miner with
+    // positive hashrate is ONLINE; reachable-but-zero-hashrate is OFFLINE.
     const now = Date.now();
     const rigStatus = metrics.hashrate_ths > 0 ? "ONLINE" : "OFFLINE";
-    lastHeartbeatAt = now; // kept purely for diagnostics in the heartbeat
+    lastHeartbeatAt = now;
 
-    // ── Compose heartbeat object ──────────────────────────────────────────────
-    // miner_type: real Antminer firmware exposes INFO.miner_version (e.g.
-    // "uart_trans.1.3") rather than INFO.type, so we fall through. Keeps
-    // the original "unknown" final fallback.
     const heartbeat = {
       batch_id: crypto.randomUUID(),
       timestamp_ms: now,
       miner_host: minerHost,
       miner_port: minerPort,
+      // Real Antminer firmware exposes INFO.type ("Antminer S19k Pro"). The
+      // miner_version fallback is defensive coverage for stripped firmwares.
       miner_type: data?.INFO?.type ?? data?.INFO?.miner_version ?? "unknown",
       discovery_status: discoveryStatus,
       status: rigStatus,
@@ -468,30 +462,44 @@ async function poll() {
 
     console.log(JSON.stringify(heartbeat, null, 2));
 
-    // ── Forward to backend (failures are swallowed inside sendToBackend) ──────
     await sendToBackend(heartbeat);
   } catch (err) {
     log(
       "ERROR",
       `Poll failed — retrying in ${POLL_INTERVAL_MS / 1000}s | ${err.message}`,
     );
-    // Non-fatal: the interval keeps running so the agent self-recovers.
   }
+}
+
+// ─── Shutdown handler ────────────────────────────────────────────────────────
+// Registered by start() BEFORE any awaited initialization so Ctrl+C/SIGTERM
+// is honoured at every lifecycle stage, not only after polling has begun.
+function shutdown(signal) {
+  log("INFO", `${signal} — stopping.`);
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  // Forceful exit. Any in-flight HTTP request to the miner or backend is
+  // abandoned, which is the right behavior for an interrupt — we don't want
+  // a hung backend socket to delay shutdown by up to REQUEST_TIMEOUT.
+  process.exit(0);
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 async function start() {
   log("INFO", "Agent starting...");
 
+  // Register signal handlers FIRST, before any awaited work. Previously
+  // these were registered after startup completed, so a Ctrl+C during
+  // fetchWalletAddress() / verifyWallet() / first poll() bypassed the
+  // cleanup logging. Doing it up-front makes shutdown deterministic at
+  // every lifecycle stage. Safe because pollTimer starts as null and the
+  // handler null-checks before clearing.
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
   // Step 1 — backend init is BEST-EFFORT.
-  // The original production agent had zero backend dependency at startup.
-  // The merge introduced two awaited calls before poll() that, if they
-  // rejected (e.g. transient network issue, backend restart), would kill
-  // the process via the top-level start().catch — leaving the operator
-  // with no telemetry and no obvious cause. We isolate them so the
-  // miner poll loop ALWAYS starts. State they would have set
-  // (operatorWallet, isClaimable, verificationMessage) safely degrades
-  // to its initial values; subsequent restarts can recover.
   try {
     await fetchWalletAddress();
   } catch (err) {
@@ -505,27 +513,13 @@ async function start() {
     await verifyWallet();
   } catch (err) {
     log("WARN", `verifyWallet failed (continuing unverified): ${err.message}`);
-    // Surface the failure in the next heartbeat instead of leaving "Pending"
     verificationDone = true;
     verificationMessage = "Verification Failed — backend unreachable";
   }
 
-  // Step 2 — first poll immediately, then on interval
+  // Step 2 — first poll immediately, then on interval.
   await poll();
-  const timer = setInterval(poll, POLL_INTERVAL_MS);
-
-  // Graceful shutdown
-  process.on("SIGINT", () => {
-    log("INFO", "SIGINT — stopping.");
-    clearInterval(timer);
-    process.exit(0);
-  });
-
-  process.on("SIGTERM", () => {
-    log("INFO", "SIGTERM — stopping.");
-    clearInterval(timer);
-    process.exit(0);
-  });
+  pollTimer = setInterval(poll, POLL_INTERVAL_MS);
 }
 
 start().catch((err) => {
