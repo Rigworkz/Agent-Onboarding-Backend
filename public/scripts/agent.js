@@ -22,7 +22,6 @@ let verificationDone = false;
 let verificationMessage = "Pending";
 let backendUrl = "http://localhost:3001"; // overwritten by config on startup
 let lastHeartbeatAt = null;
-let rigStatus = "OFFLINE";
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 function log(level, msg) {
@@ -39,7 +38,7 @@ function loadConfig() {
   return JSON.parse(raw);
 }
 
-// ─── Digest Auth helpers ─────────────────────────────────────────────────────
+// ─── Digest Auth helpers (UNCHANGED from production) ─────────────────────────
 function parseChallenge(header) {
   const out = {};
   const re = /(\w+)=(?:"([^"]+)"|([^\s,]+))/g;
@@ -90,8 +89,7 @@ function buildAuthHeader(method, uriPath, challenge) {
   );
 }
 
-// ─── Low-level HTTP GET with timeout ─────────────────────────────────────────
-// host/port are now parameters so they can be driven from config.json.
+// ─── Low-level HTTP GET with timeout (UNCHANGED) ─────────────────────────────
 function httpGet(host, port, uriPath, headers = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -128,7 +126,7 @@ function httpGet(host, port, uriPath, headers = {}) {
   });
 }
 
-// ─── Digest fetch: probe → 401 → authenticated request ───────────────────────
+// ─── Digest fetch: probe → 401 → authenticated request (UNCHANGED) ───────────
 async function digestGet(host, port, uriPath) {
   const probe = await httpGet(host, port, uriPath);
 
@@ -148,7 +146,6 @@ async function digestGet(host, port, uriPath) {
 
   const challenge = parseChallenge(wwwAuth);
 
-  // stale=true → nonce expired; the 401 already carries a fresh nonce, so just continue
   if (challenge.stale === "true") {
     log("WARN", `Stale nonce on ${uriPath} — using fresh nonce from challenge`);
   }
@@ -198,6 +195,7 @@ async function fetchWalletAddress() {
         port: url.port || 5000,
         path: url.pathname + url.search,
         method: "GET",
+        timeout: REQUEST_TIMEOUT,
       },
       (res) => {
         let data = "";
@@ -205,6 +203,10 @@ async function fetchWalletAddress() {
         res.on("end", () => resolve(data));
       },
     );
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("encrypted-address request timed out"));
+    });
     req.on("error", reject);
     req.end();
   });
@@ -264,6 +266,7 @@ async function verifyWallet() {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(body),
         },
+        timeout: REQUEST_TIMEOUT,
       },
       (res) => {
         let data = "";
@@ -271,6 +274,10 @@ async function verifyWallet() {
         res.on("end", () => resolve(data));
       },
     );
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("validate-token request timed out"));
+    });
     req.on("error", reject);
     req.write(body);
     req.end();
@@ -348,6 +355,7 @@ async function sendToBackend(heartbeat) {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(body),
           },
+          timeout: REQUEST_TIMEOUT,
         },
         (res) => {
           let data = "";
@@ -355,6 +363,10 @@ async function sendToBackend(heartbeat) {
           res.on("end", () => resolve(data));
         },
       );
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("onboard request timed out"));
+      });
       req.on("error", reject);
       req.write(body);
       req.end();
@@ -363,6 +375,7 @@ async function sendToBackend(heartbeat) {
     log("INFO", "Telemetry sent to backend");
     log("INFO", response);
   } catch (err) {
+    // Backend failure must NEVER stop us from polling the miner.
     log("ERROR", "Failed to send telemetry: " + err.message);
   }
 }
@@ -416,34 +429,27 @@ async function poll() {
       max_chip_temp: maxTemp,
     };
 
-    // ── Heartbeat-based ONLINE / OFFLINE detection ────────────────────────────
-    // On the very first successful poll we derive status from actual hashrate,
-    // which is more accurate than arbitrarily declaring ONLINE before any data
-    // has been seen. On subsequent polls the time-gap logic takes over.
+    // ── Status detection (RESTORED to original semantics) ─────────────────────
+    // The original production agent treated "reachable miner with positive
+    // hashrate" as ONLINE and everything else (including a reachable miner
+    // reporting zero hashrate, e.g. stalled chips) as OFFLINE. The previous
+    // gap-based heuristic effectively reported ONLINE on every successful
+    // poll because POLL_INTERVAL_MS (30s) is well under its 60s threshold,
+    // which masks chip failures. Reverting to the proven test.
     const now = Date.now();
-
-    if (lastHeartbeatAt !== null) {
-      const ageMs = now - lastHeartbeatAt;
-      if (ageMs < 60 * 1000) {
-        rigStatus = "ONLINE";
-      } else if (ageMs > 2 * 60 * 1000) {
-        rigStatus = "OFFLINE";
-      }
-      // 60 s – 120 s window: keep the previous status (avoids noisy flapping)
-    } else {
-      // First poll — use hashrate as the ground truth
-      rigStatus = metrics.hashrate_ths > 0 ? "ONLINE" : "OFFLINE";
-    }
-
-    lastHeartbeatAt = now;
+    const rigStatus = metrics.hashrate_ths > 0 ? "ONLINE" : "OFFLINE";
+    lastHeartbeatAt = now; // kept purely for diagnostics in the heartbeat
 
     // ── Compose heartbeat object ──────────────────────────────────────────────
+    // miner_type: real Antminer firmware exposes INFO.miner_version (e.g.
+    // "uart_trans.1.3") rather than INFO.type, so we fall through. Keeps
+    // the original "unknown" final fallback.
     const heartbeat = {
       batch_id: crypto.randomUUID(),
       timestamp_ms: now,
       miner_host: minerHost,
       miner_port: minerPort,
-      miner_type: data?.INFO?.type ?? "unknown",
+      miner_type: data?.INFO?.type ?? data?.INFO?.miner_version ?? "unknown",
       discovery_status: discoveryStatus,
       status: rigStatus,
       claimable: isClaimable,
@@ -462,7 +468,7 @@ async function poll() {
 
     console.log(JSON.stringify(heartbeat, null, 2));
 
-    // ── Forward to backend ────────────────────────────────────────────────────
+    // ── Forward to backend (failures are swallowed inside sendToBackend) ──────
     await sendToBackend(heartbeat);
   } catch (err) {
     log(
@@ -477,13 +483,34 @@ async function poll() {
 async function start() {
   log("INFO", "Agent starting...");
 
-  // Step 1 — fetch operator wallet address (RSA-encrypted) from backend
-  await fetchWalletAddress();
+  // Step 1 — backend init is BEST-EFFORT.
+  // The original production agent had zero backend dependency at startup.
+  // The merge introduced two awaited calls before poll() that, if they
+  // rejected (e.g. transient network issue, backend restart), would kill
+  // the process via the top-level start().catch — leaving the operator
+  // with no telemetry and no obvious cause. We isolate them so the
+  // miner poll loop ALWAYS starts. State they would have set
+  // (operatorWallet, isClaimable, verificationMessage) safely degrades
+  // to its initial values; subsequent restarts can recover.
+  try {
+    await fetchWalletAddress();
+  } catch (err) {
+    log(
+      "WARN",
+      `fetchWalletAddress failed (continuing without wallet): ${err.message}`,
+    );
+  }
 
-  // Step 2 — validate install token; sets isClaimable + verificationMessage
-  await verifyWallet();
+  try {
+    await verifyWallet();
+  } catch (err) {
+    log("WARN", `verifyWallet failed (continuing unverified): ${err.message}`);
+    // Surface the failure in the next heartbeat instead of leaving "Pending"
+    verificationDone = true;
+    verificationMessage = "Verification Failed — backend unreachable";
+  }
 
-  // Step 3 — first poll immediately, then on interval
+  // Step 2 — first poll immediately, then on interval
   await poll();
   const timer = setInterval(poll, POLL_INTERVAL_MS);
 

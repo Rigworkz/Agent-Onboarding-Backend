@@ -561,7 +561,7 @@ try {
     $privateKeyPath = Join-Path $InstallDir "private_key.pem"
     Set-Content -Path $privateKeyPath -Value $privateKeyPem -Encoding Ascii
     # Use icacls instead of Set-Acl -- no SeSecurityPrivilege required
-    icacls $privateKeyPath /inheritance:r /grant:r "${env:USERNAME}:F" 2>$null | Out-Null
+    cmd /c "icacls `"$privateKeyPath`" /inheritance:r /grant:r `"${env:USERNAME}:F`"" > $null 2>&1
 
     Set-Content -Path (Join-Path $InstallDir "public_key.pem") -Value $publicKeyPem -Encoding Ascii
 
