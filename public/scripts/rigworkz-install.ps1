@@ -2,14 +2,13 @@ param(
     [string]$Payload,
     [string]$BackendUrl = "http://35.224.207.37:5000",
     [string]$AgentUrl = "http://35.224.207.37:5000/scripts/agent.js",
-    [string]$MockTelemetryUrl = "http://35.224.207.37:5000/scripts/mock-telemetry.json",
     [string]$InstallDir = "C:\rigworkz-agent",
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
     [int]$TcpConnectTimeoutMs = 400,
     [int]$EndpointTimeoutSec = 10,
     [int[]]$MinerPorts = @(80, 8080, 4028, 8888)
-)
+)F
 
 if (-not $Payload) {
     Write-Host "No payload provided"
@@ -636,9 +635,6 @@ try {
     Write-Log "INFO" "Downloading agent ..."
     $agentDest = Join-Path $InstallDir "agent.js"
     Invoke-WebRequest -Uri $AgentUrl -OutFile $agentDest
-
-    $mockDest = Join-Path $InstallDir "mock-telemetry.json"
-    Invoke-WebRequest -Uri $MockTelemetryUrl -OutFile $mockDest
 
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
         Write-Host ""
