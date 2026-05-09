@@ -8,7 +8,7 @@ param(
     [int]$TcpConnectTimeoutMs = 400,
     [int]$EndpointTimeoutSec = 10,
     [int[]]$MinerPorts = @(80, 8080, 4028, 8888)
-)F
+)
 
 if (-not $Payload) {
     Write-Host "No payload provided"
