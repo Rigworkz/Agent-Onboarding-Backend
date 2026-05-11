@@ -5,6 +5,7 @@ import { authenticateToken } from '../middleware/auth';
 import { verifyWallet, validateInstallToken } from '../controllers/authController';
 import { onboardMachine, getMachine, getEncryptedAddress, getAllMachines, getMachineStatus, getMachineTelemetry, getMachineIdByWallet, generateAndSaveFingerprint, registerMachine } from '../controllers/machineController';
 
+import { upsertOperatorProfile, getOperatorProfile } from '../controllers/operatorController';
 
 
 const router = Router();
@@ -131,8 +132,7 @@ router.get('/machine/:machine_id', authenticateToken, getMachine);
 
 router.get('/machine/:machine_id/status', authenticateToken, getMachineStatus);
 
-// Operator Routes
-import { upsertOperatorProfile, getOperatorProfile } from '../controllers/operatorController';
+//operator roots
 /**
  * @swagger
  * /api/operator/profile:
