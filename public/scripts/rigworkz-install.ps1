@@ -5,6 +5,13 @@ param(
     [string]$InstallDir = "C:\rigworkz-agent",
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
+    # Explicit miner IP override. When provided, the LAN scan is skipped and
+    # the supplied IP is written directly to config.json. Use this for:
+    #   - remote installs over Tailscale where the laptop's primary subnet
+    #     differs from the miner's subnet
+    #   - multi-NIC laptops where auto-detection picks the wrong adapter
+    #   - operators who already know the miner IP and want to skip the scan
+    [string]$MinerIp = "",
     [int]$TcpConnectTimeoutMs = 400,
     [int]$EndpointTimeoutSec = 10,
     [int[]]$MinerPorts = @(80, 8080, 4028, 8888)
@@ -29,6 +36,10 @@ function Write-Log {
 }
 
 function Get-PrimaryIPv4Config {
+    if (-not (Get-Command Get-NetIPConfiguration -ErrorAction SilentlyContinue)) {
+        throw "Get-NetIPConfiguration unavailable (requires Windows 8+). Re-run with -MinerIp <ip> to bypass auto-discovery."
+    }
+
     $cfg = Get-NetIPConfiguration |
         Where-Object {
             $_.IPv4Address -and
@@ -39,7 +50,7 @@ function Get-PrimaryIPv4Config {
         Select-Object -First 1
 
     if (-not $cfg) {
-        throw "No active IPv4 adapter found"
+        throw "No active IPv4 adapter found. Re-run with -MinerIp <ip> to bypass auto-discovery."
     }
 
     return $cfg
@@ -47,21 +58,13 @@ function Get-PrimaryIPv4Config {
 
 function Get-MaskBytesFromPrefixLength {
     param([int]$PrefixLength)
-
     $mask = New-Object byte[] 4
     for ($i = 0; $i -lt 4; $i++) {
         $bits = $PrefixLength - ($i * 8)
-        if ($bits -ge 8) {
-            $mask[$i] = 255
-        }
-        elseif ($bits -le 0) {
-            $mask[$i] = 0
-        }
-        else {
-            $mask[$i] = [byte](256 - [int][math]::Pow(2, 8 - $bits))
-        }
+        if ($bits -ge 8)      { $mask[$i] = 255 }
+        elseif ($bits -le 0)  { $mask[$i] = 0   }
+        else                  { $mask[$i] = [byte](256 - [int][math]::Pow(2, 8 - $bits)) }
     }
-
     return $mask
 }
 
@@ -80,50 +83,35 @@ function Convert-UInt32ToIp {
 }
 
 function Get-SubnetHosts {
-    param(
-        [string]$Ip,
-        [int]$PrefixLength
-    )
+    param([string]$Ip, [int]$PrefixLength)
 
-    $ipBytes = [System.Net.IPAddress]::Parse($Ip).GetAddressBytes()
+    $ipBytes   = [System.Net.IPAddress]::Parse($Ip).GetAddressBytes()
     $maskBytes = Get-MaskBytesFromPrefixLength -PrefixLength $PrefixLength
 
-    $networkBytes = New-Object byte[] 4
+    $networkBytes  = New-Object byte[] 4
     $wildcardBytes = New-Object byte[] 4
-
     for ($i = 0; $i -lt 4; $i++) {
-        $networkBytes[$i] = $ipBytes[$i] -band $maskBytes[$i]
+        $networkBytes[$i]  = $ipBytes[$i] -band $maskBytes[$i]
         $wildcardBytes[$i] = 255 - $maskBytes[$i]
     }
 
-    $networkInt = Convert-BytesToUInt32 -Bytes $networkBytes
+    $networkInt  = Convert-BytesToUInt32 -Bytes $networkBytes
     $wildcardInt = Convert-BytesToUInt32 -Bytes $wildcardBytes
-
     $start = [uint64]$networkInt + 1
-    $end = [uint64]$networkInt + [uint64]$wildcardInt - 1
+    $end   = [uint64]$networkInt + [uint64]$wildcardInt - 1
 
     $hosts = New-Object System.Collections.Generic.List[string]
     for ($n = $start; $n -le $end; $n++) {
         $hosts.Add((Convert-UInt32ToIp -Value ([uint32]$n)))
     }
-
     return $hosts
 }
 
 function Get-CachedDiscovery {
     param([string]$InstallDir)
-
     $configPath = Join-Path $InstallDir "config.json"
-    if (-not (Test-Path $configPath)) {
-        return $null
-    }
-
-    try {
-        return (Get-Content $configPath -Raw | ConvertFrom-Json)
-    }
-    catch {
-        return $null
-    }
+    if (-not (Test-Path $configPath)) { return $null }
+    try { return (Get-Content $configPath -Raw | ConvertFrom-Json) } catch { return $null }
 }
 
 function Save-DiscoveryResult {
@@ -142,14 +130,14 @@ function Save-DiscoveryResult {
         backendUrl = $BackendUrl
         machine_id = $MachineId
         public_key = $PublicKey
-        miner_ip   = if ($Miner) { $Miner.miner_ip } else { $null }
+        miner_ip   = if ($Miner) { $Miner.miner_ip }   else { $null }
         miner_port = if ($Miner) { $Miner.miner_port } else { $null }
         discovery  = @{
-            method        = "local-first + tcp-scan"
+            method        = if ($Meta.method) { $Meta.method } else { "local-first + tcp-scan" }
             status        = if ($Miner) { "found" } else { "not_found" }
             scanned_at    = (Get-Date).ToString("o")
             miner_type    = if ($Miner) { $Miner.miner_type } else { $null }
-            auth_mode     = if ($Miner) { $Miner.auth_mode } else { $null }
+            auth_mode     = if ($Miner) { $Miner.auth_mode }  else { $null }
             adapter       = $Meta.adapter
             subnet        = $Meta.subnet
             total_hosts   = $Meta.total_hosts
@@ -163,60 +151,16 @@ function Save-DiscoveryResult {
 
 function Get-Md5Hex {
     param([string]$Text)
-
     $md5 = [System.Security.Cryptography.MD5]::Create()
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-        $hash = $md5.ComputeHash($bytes)
+        $hash  = $md5.ComputeHash($bytes)
         return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
     }
-    finally {
-        $md5.Dispose()
-    }
-}
-
-function Parse-AuthChallenge {
-    param([string]$Header)
-
-    $out = @{}
-    foreach ($m in [regex]::Matches($Header, '(\w+)=(?:"([^"]+)"|([^\s,]+))')) {
-        $out[$m.Groups[1].Value] = if ($m.Groups[2].Value) { $m.Groups[2].Value } else { $m.Groups[3].Value }
-    }
-    return $out
-}
-
-function Build-DigestAuthHeader {
-    param(
-        [string]$Method,
-        [string]$UriPath,
-        [hashtable]$Challenge,
-        [string]$User,
-        [string]$Pass
-    )
-
-    $realm = $Challenge.realm
-    $nonce = $Challenge.nonce
-    $qop = $Challenge.qop
-
-    $ha1 = Get-Md5Hex "$User`:$realm`:$Pass"
-    $ha2 = Get-Md5Hex "$Method`:$UriPath"
-
-    if ($qop -and $qop -like "*auth*") {
-        $nc = "00000001"
-        $cnonce = ([guid]::NewGuid().ToString("N")).Substring(0, 16)
-        $response = Get-Md5Hex "$ha1`:$nonce`:$nc`:$cnonce`:auth`:$ha2"
-
-        return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", qop=auth, nc={4}, cnonce="{5}", response="{6}"' -f `
-            $User, $realm, $nonce, $UriPath, $nc, $cnonce, $response)
-    }
-
-    $response = Get-Md5Hex "$ha1`:$nonce`:$ha2"
-    return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}"' -f `
-        $User, $realm, $nonce, $UriPath, $response)
+    finally { $md5.Dispose() }
 }
 
 # DER/ASN.1 helpers for RSA key export
-
 function ConvertTo-DerLength([int]$n) {
     if ($n -lt 0x80)  { return [byte[]]@($n) }
     if ($n -lt 0x100) { return [byte[]]@(0x81, $n) }
@@ -263,113 +207,128 @@ function ConvertTo-SpkiPublicKey([System.Security.Cryptography.RSAParameters]$p)
     }
 }
 
+# ─── ProbeScript ─────────────────────────────────────────────────────────────
+# Runs inside a Start-Job process. Uses [System.Net.HttpWebRequest] instead
+# of Invoke-WebRequest so that we own the response object lifetime and the
+# WWW-Authenticate header is never lost to auto-disposal on 401 — which is
+# the silent failure mode that Invoke-WebRequest exhibits in WPS 5.1 job
+# processes when the server returns 401.
 $ProbeScript = {
     param(
         [string]$Ip,
         [int]$Port,
-        [int]$EndpointTimeoutSec,
+        [int]$EndpointTimeoutMs,   # milliseconds, not seconds — passed as int
         [string]$MinerUser,
         [string]$MinerPass
     )
 
-    function Get-Md5Hex {
-        param([string]$Text)
+    function Get-Md5Hex([string]$text) {
         $md5 = [System.Security.Cryptography.MD5]::Create()
         try {
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-            $hash = $md5.ComputeHash($bytes)
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+            $hash  = $md5.ComputeHash($bytes)
             return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
         }
         finally { $md5.Dispose() }
     }
 
-    function Parse-AuthChallenge {
-        param([string]$Header)
+    function Parse-AuthChallenge([string]$header) {
         $out = @{}
-        foreach ($m in [regex]::Matches($Header, '(\w+)=(?:"([^"]+)"|([^\s,]+))')) {
+        foreach ($m in [regex]::Matches($header, '(\w+)=(?:"([^"]+)"|([^\s,]+))')) {
             $out[$m.Groups[1].Value] = if ($m.Groups[2].Value) { $m.Groups[2].Value } else { $m.Groups[3].Value }
         }
         return $out
     }
 
-    function Build-DigestAuthHeader {
-        param([string]$Method, [string]$UriPath, [hashtable]$Challenge, [string]$User, [string]$Pass)
-        $realm = $Challenge.realm
-        $nonce = $Challenge.nonce
-        $qop   = $Challenge.qop
-        $ha1   = Get-Md5Hex "$User`:$realm`:$Pass"
-        $ha2   = Get-Md5Hex "$Method`:$UriPath"
-        if ($qop -and $qop -like "*auth*") {
+    function Build-DigestHeader([string]$method, [string]$uriPath, [hashtable]$ch, [string]$user, [string]$pass) {
+        $ha1 = Get-Md5Hex "$user`:$($ch.realm)`:$pass"
+        $ha2 = Get-Md5Hex "$method`:$uriPath"
+        if ($ch.qop -and $ch.qop -like "*auth*") {
             $nc     = "00000001"
             $cnonce = ([guid]::NewGuid().ToString("N")).Substring(0, 16)
-            $resp   = Get-Md5Hex "$ha1`:$nonce`:$nc`:$cnonce`:auth`:$ha2"
+            $resp   = Get-Md5Hex "$ha1`:$($ch.nonce)`:$nc`:$cnonce`:auth`:$ha2"
             return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", qop=auth, nc={4}, cnonce="{5}", response="{6}"' -f `
-                $User, $realm, $nonce, $UriPath, $nc, $cnonce, $resp)
+                $user, $ch.realm, $ch.nonce, $uriPath, $nc, $cnonce, $resp)
         }
-        $resp = Get-Md5Hex "$ha1`:$nonce`:$ha2"
+        $resp = Get-Md5Hex "$ha1`:$($ch.nonce)`:$ha2"
         return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}"' -f `
-            $User, $realm, $nonce, $UriPath, $resp)
+            $user, $ch.realm, $ch.nonce, $uriPath, $resp)
+    }
+
+    # Sends one GET using HttpWebRequest. Returns the body string on success,
+    # or a hashtable { StatusCode; Headers } for non-200 so the caller can
+    # inspect the WWW-Authenticate header without worrying about disposal.
+    function Invoke-RawGet([string]$url, [string]$authHeader = $null, [int]$timeoutMs = 5000) {
+        $req = [System.Net.HttpWebRequest]::Create($url)
+        $req.Method  = "GET"
+        $req.Timeout = $timeoutMs
+        $req.AllowAutoRedirect = $false
+        if ($authHeader) { $req.Headers["Authorization"] = $authHeader }
+
+        try {
+            $resp   = $req.GetResponse()
+            $stream = $resp.GetResponseStream()
+            $body   = (New-Object System.IO.StreamReader $stream).ReadToEnd()
+            $resp.Close()
+            return @{ ok = $true; body = $body }
+        }
+        catch [System.Net.WebException] {
+            $webResp = $_.Exception.Response
+            if ($null -eq $webResp) { return @{ ok = $false; statusCode = 0; wwwAuth = $null } }
+            $code    = [int]$webResp.StatusCode
+            $wwwAuth = $webResp.Headers["WWW-Authenticate"]
+            $webResp.Close()
+            return @{ ok = $false; statusCode = $code; wwwAuth = $wwwAuth }
+        }
+        catch {
+            return @{ ok = $false; statusCode = 0; wwwAuth = $null }
+        }
     }
 
     $uriPath = "/cgi-bin/stats.cgi"
     $url     = "http://$Ip`:$Port$uriPath"
 
+    # Step 1 — probe (expect 401 from Antminer, or 200 from open firmware)
+    $probe = Invoke-RawGet -url $url -timeoutMs $EndpointTimeoutMs
+
+    if ($probe.ok) {
+        # Open firmware — no auth required
+        try {
+            $json = $probe.body | ConvertFrom-Json -ErrorAction Stop
+            if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
+                $minerType = if ($json.INFO.type) { $json.INFO.type } else { "unknown" }
+                return [pscustomobject]@{ miner_ip=$Ip; miner_port=$Port; miner_type=$minerType; auth_mode="open" }
+            }
+        }
+        catch {}
+        return $null
+    }
+
+    if ($probe.statusCode -ne 401 -or -not $probe.wwwAuth) {
+        return $null   # not a miner (or unreachable)
+    }
+
+    # Step 2 — digest auth using nonce from the 401 challenge
+    $ch      = Parse-AuthChallenge $probe.wwwAuth
+    $authHdr = Build-DigestHeader "GET" $uriPath $ch $MinerUser $MinerPass
+    $authed  = Invoke-RawGet -url $url -authHeader $authHdr -timeoutMs $EndpointTimeoutMs
+
+    if (-not $authed.ok) { return $null }
+
     try {
-        $res = Invoke-WebRequest -Uri $url -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-        if ($res.StatusCode -eq 200) {
-            try {
-                $json = $res.Content | ConvertFrom-Json -ErrorAction Stop
-                if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
-                    $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } `
-                                 elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } `
-                                 else { "unknown" }
-                    return [pscustomobject]@{
-                        miner_ip   = $Ip
-                        miner_port = $Port
-                        miner_type = $minerType
-                        auth_mode  = "open"
-                    }
-                }
-            }
-            catch {}
+        $json = $authed.body | ConvertFrom-Json -ErrorAction Stop
+        if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
+            $minerType = if ($json.INFO.type) { $json.INFO.type } else { "unknown" }
+            return [pscustomobject]@{ miner_ip=$Ip; miner_port=$Port; miner_type=$minerType; auth_mode="digest" }
         }
     }
-    catch {
-        $resp = $_.Exception.Response
-        if ($resp -and [int]$resp.StatusCode -eq 401) {
-            $header = $resp.Headers["WWW-Authenticate"]
-            if ($header) {
-                try {
-                    $ch      = Parse-AuthChallenge -Header $header
-                    $authHdr = Build-DigestAuthHeader -Method "GET" -UriPath $uriPath -Challenge $ch -User $MinerUser -Pass $MinerPass
-                    $authed  = Invoke-WebRequest -Uri $url -Headers @{ Authorization = $authHdr } `
-                                 -TimeoutSec $EndpointTimeoutSec -UseBasicParsing -ErrorAction Stop
-                    if ($authed.StatusCode -eq 200) {
-                        $json = $authed.Content | ConvertFrom-Json -ErrorAction Stop
-                        if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
-                            $minerType = if ($json.INFO -and $json.INFO.type) { $json.INFO.type } `
-                                         elseif ($json.INFO -and $json.INFO.Type) { $json.INFO.Type } `
-                                         else { "unknown" }
-                            return [pscustomobject]@{
-                                miner_ip   = $Ip
-                                miner_port = $Port
-                                miner_type = $minerType
-                                auth_mode  = "digest"
-                            }
-                        }
-                    }
-                }
-                catch {}
-            }
-        }
-    }
+    catch {}
 
     return $null
 }
 
 function Get-OrderedPorts {
     param([int]$PreferredPort = 0, [int[]]$Ports)
-
     $ordered = New-Object System.Collections.Generic.List[int]
     if ($PreferredPort -gt 0) { [void]$ordered.Add($PreferredPort) }
     foreach ($p in $Ports) {
@@ -382,9 +341,12 @@ function Test-MinerEndpoint {
     param([string]$Ip, [int]$PreferredPort = 0)
 
     $ports = Get-OrderedPorts -PreferredPort $PreferredPort -Ports $MinerPorts
-    $jobs  = @()
+    # Convert EndpointTimeoutSec to ms for ProbeScript
+    $timeoutMs = $EndpointTimeoutSec * 1000
+    $jobs = @()
     foreach ($port in $ports) {
-        $jobs += Start-Job -ScriptBlock $ProbeScript -ArgumentList $Ip, $port, $EndpointTimeoutSec, $MinerUser, $MinerPass
+        $jobs += Start-Job -ScriptBlock $ProbeScript `
+                           -ArgumentList $Ip, $port, $timeoutMs, $MinerUser, $MinerPass
     }
 
     try {
@@ -412,9 +374,6 @@ function Test-MinerEndpoint {
     return $null
 }
 
-# Parallel TCP connect scan via RunspacePool.
-# No ICMP used -- works even when ping is blocked by the device or router.
-# Each host is tested on all miner ports; first successful TCP handshake marks it alive.
 function Get-TcpAliveHosts {
     param([string[]]$Hosts, [int[]]$Ports, [int]$TimeoutMs)
 
@@ -429,9 +388,7 @@ function Get-TcpAliveHosts {
                 }
             }
             catch {}
-            finally {
-                try { $tcp.Close() } catch {}
-            }
+            finally { try { $tcp.Close() } catch {} }
         }
         return $null
     }
@@ -459,7 +416,6 @@ function Get-TcpAliveHosts {
 
     $pool.Close()
     $pool.Dispose()
-
     return $alive
 }
 
@@ -477,6 +433,7 @@ function Discover-Miner {
     Write-Host ""
 
     $meta = @{
+        method        = "local-first + tcp-scan"
         adapter       = $cfg.InterfaceAlias
         subnet        = "$ip/$prefix"
         total_hosts   = 0
@@ -484,7 +441,7 @@ function Discover-Miner {
         alive_hosts   = 0
     }
 
-    # Check cache first
+    # Cache check
     $cached = Get-CachedDiscovery -InstallDir $InstallDir
     if ($cached -and $cached.miner_ip) {
         Write-Log "INFO" "Trying last known miner at $($cached.miner_ip):$($cached.miner_port) ..."
@@ -496,7 +453,7 @@ function Discover-Miner {
         Write-Log "WARN" "Cached miner not responding, moving on"
     }
 
-    # Try local IP first
+    # Local machine check
     Write-Log "INFO" "Checking local machine (ports $($MinerPorts -join ' / ')) ..."
     $localMiner = Test-MinerEndpoint -Ip $ip -PreferredPort 8080
     if ($localMiner) {
@@ -504,8 +461,9 @@ function Discover-Miner {
         return [pscustomobject]@{ Miner = $localMiner; Meta = $meta }
     }
 
-    # Parallel TCP scan across subnet
-    $allHosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix | Where-Object { $_ -ne $ip -and $_ -ne $gateway })
+    # Parallel TCP scan
+    $allHosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix |
+                  Where-Object { $_ -ne $ip -and $_ -ne $gateway })
     $meta.total_hosts = $allHosts.Count
 
     Write-Host ""
@@ -525,6 +483,7 @@ function Discover-Miner {
     $checked = 0
     foreach ($candidate in $aliveHosts) {
         $checked++
+        Write-Log "INFO" "  Probing $candidate ..."
         $miner = Test-MinerEndpoint -Ip $candidate
         if ($miner) {
             $meta.checked_hosts = $checked
@@ -536,6 +495,61 @@ function Discover-Miner {
     return [pscustomobject]@{ Miner = $null; Meta = $meta }
 }
 
+function Resolve-Miner {
+    param([string]$ExplicitIp, [string]$InstallDir)
+
+    if ($ExplicitIp) {
+        Write-Log "INFO" "Manual miner IP provided: $ExplicitIp - skipping LAN scan"
+        Write-Host ""
+
+        $probed = Test-MinerEndpoint -Ip $ExplicitIp
+        $meta = @{
+            method        = "manual-override"
+            adapter       = "manual-override"
+            subnet        = "manual-override"
+            total_hosts   = 0
+            checked_hosts = 1
+            alive_hosts   = if ($probed) { 1 } else { 0 }
+        }
+
+        if ($probed) {
+            return [pscustomobject]@{ Miner = $probed; Meta = $meta }
+        }
+
+        Write-Log "WARN" "Probe to $ExplicitIp failed on standard ports - writing config anyway, agent will keep retrying"
+        $manualMiner = [pscustomobject]@{
+            miner_ip   = $ExplicitIp
+            miner_port = 80
+            miner_type = "unknown"
+            auth_mode  = "unknown"
+        }
+        return [pscustomobject]@{ Miner = $manualMiner; Meta = $meta }
+    }
+
+    return Discover-Miner -InstallDir $InstallDir
+}
+
+function Test-NodeVersion {
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+        return @{ ok = $false; reason = "Node.js is not installed or not in PATH" }
+    }
+    try {
+        $raw   = (& node --version) 2>$null
+        $clean = $raw.TrimStart('v').Trim()
+        $parts = $clean.Split('.')
+        $major = [int]$parts[0]
+        $minor = if ($parts.Count -gt 1) { [int]$parts[1] } else { 0 }
+        if ($major -lt 14 -or ($major -eq 14 -and $minor -lt 17)) {
+            return @{ ok = $false; reason = "Node.js v$clean is too old (need 14.17+)" }
+        }
+        return @{ ok = $true; version = $raw }
+    }
+    catch {
+        return @{ ok = $false; reason = "Failed to query Node.js: $($_.Exception.Message)" }
+    }
+}
+
+# ─── Main ────────────────────────────────────────────────────────────────────
 try {
     if (-not (Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -543,9 +557,7 @@ try {
 
     $machineId = [guid]::NewGuid().ToString()
 
-    # RSA Key Pair
     Write-Log "INFO" "Generating RSA key pair ..."
-
     $rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048)
     try {
         $rsaParams     = $rsa.ExportParameters($true)
@@ -554,25 +566,19 @@ try {
         $publicKeyPem  = $pubKey.Pem
         $publicKeyB64  = $pubKey.Base64
     }
-    finally {
-        $rsa.Dispose()
-    }
+    finally { $rsa.Dispose() }
 
     $privateKeyPath = Join-Path $InstallDir "private_key.pem"
     Set-Content -Path $privateKeyPath -Value $privateKeyPem -Encoding Ascii
-    # Use icacls instead of Set-Acl -- no SeSecurityPrivilege required
     cmd /c "icacls `"$privateKeyPath`" /inheritance:r /grant:r `"${env:USERNAME}:F`"" > $null 2>&1
-
     Set-Content -Path (Join-Path $InstallDir "public_key.pem") -Value $publicKeyPem -Encoding Ascii
-
     Write-Log "OK" "RSA key pair ready"
 
-    # ── Register Machine ─────────────────────────────────────────────────────
+    # ── Register Machine ──────────────────────────────────────────────────────
     Write-Log "INFO" "Registering machine with backend ..."
     try {
         $decoded      = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload))
         $installToken = ($decoded | ConvertFrom-Json).installToken
-
         if (-not $installToken) { throw "installToken missing from payload" }
 
         $registerBody = @{
@@ -591,14 +597,12 @@ try {
 
         $registerResult = $registerResponse.Content | ConvertFrom-Json
         if ($registerResult.success -ne $true) { throw "Backend rejected registration" }
-
         Write-Log "OK" "Machine registered"
     }
     catch {
         Write-Log "ERR" "Registration failed: $($_.Exception.Message)"
         exit 1
     }
-    # ─────────────────────────────────────────────────────────────────────────
 
     Write-Host ""
     Write-Host "  ================================================" -ForegroundColor DarkCyan
@@ -606,19 +610,20 @@ try {
     Write-Host "  ================================================" -ForegroundColor DarkCyan
     Write-Host ""
 
-    Write-Log "INFO" "Starting miner discovery ..."
+    Write-Log "INFO" "Resolving miner endpoint ..."
     Write-Host ""
 
-    $result = Discover-Miner -InstallDir $InstallDir
+    $result = Resolve-Miner -ExplicitIp $MinerIp -InstallDir $InstallDir
     $miner  = $result.Miner
 
     Write-Host ""
 
     if ($miner) {
-        Write-Log "OK"   "Miner found - $($miner.miner_ip):$($miner.miner_port) ($($miner.miner_type), auth: $($miner.auth_mode))"
+        Write-Log "OK" "Miner found - $($miner.miner_ip):$($miner.miner_port) ($($miner.miner_type), auth: $($miner.auth_mode))"
     }
     else {
-        Write-Log "WARN" "No miner found on this network (scanned $($result.Meta.checked_hosts) hosts, $($result.Meta.alive_hosts) with open ports)"
+        Write-Log "WARN" "No miner found on this network (checked $($result.Meta.checked_hosts) hosts, $($result.Meta.alive_hosts) with open ports)"
+        Write-Log "INFO" "Tip: if the miner is on a different subnet or reachable via Tailscale, re-run with -MinerIp <ip>"
     }
 
     Write-Host ""
@@ -636,11 +641,13 @@ try {
     $agentDest = Join-Path $InstallDir "agent.js"
     Invoke-WebRequest -Uri $AgentUrl -OutFile $agentDest
 
-    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    $nodeCheck = Test-NodeVersion
+    if (-not $nodeCheck.ok) {
         Write-Host ""
-        Write-Log "ERR" "Node.js is not installed or not in PATH - cannot start agent"
+        Write-Log "ERR" "$($nodeCheck.reason). Install Node.js >= 14.17 from https://nodejs.org then start the agent manually: node `"$agentDest`""
         exit 1
     }
+    Write-Log "INFO" "Node.js $($nodeCheck.version) detected"
 
     Write-Log "INFO" "Launching agent process ..."
     Start-Process -FilePath "node" -ArgumentList "`"$agentDest`"" -WorkingDirectory $InstallDir
