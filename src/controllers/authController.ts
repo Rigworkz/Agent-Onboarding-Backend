@@ -53,14 +53,14 @@ export const getNonce = async (req: Request, res: Response) => {
     const connection = await pool.getConnection();
     // Remove any old unused sessions for this address
     await connection.query(
-      "DELETE FROM wallet_sessions WHERE address = ? AND is_verified = false",
+      "DELETE FROM wallet_sessions WHERE operator_wallet = ? AND is_verified = false",
       [normalizedAddress],
     );
     // Insert new session into the database
     try {
       const [result]: any = await connection.query(
         `INSERT INTO wallet_sessions 
-        (address, session_id, nonce, timestamp, is_verified) 
+        (operator_wallet, session_id, nonce, timestamp, is_verified) 
         VALUES (?, ?, ?, ?, false)`,
         [normalizedAddress, sessionId, nonce, timestamp],
       );
@@ -81,7 +81,7 @@ export const verifyWallet = async (req: Request, res: Response) => {
     const { address, sessionId, signature } = req.body;
     // 1. Fetch session from DB
     const [rows]: any = await pool.query(
-      `SELECT * FROM wallet_sessions WHERE session_id = ? AND address = ?`,
+      `SELECT * FROM wallet_sessions WHERE session_id = ? AND operator_wallet = ?`,
       [sessionId, address],
     );
     if (rows.length === 0) {
@@ -105,32 +105,19 @@ export const verifyWallet = async (req: Request, res: Response) => {
     const secret = process.env.JWT_SECRET || "your_jwt_secret";
 
     const installToken = crypto.randomBytes(32).toString("hex");
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min expiry
+    //const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min expiry
     await pool.query(
       `UPDATE wallet_sessions 
       SET is_verified = true,
           install_token = ?,
-          token_expires_at = ?,
           signature = ?
       WHERE session_id = ?`,
-      [installToken, expiresAt, signature, sessionId],
+      [installToken, signature, sessionId],
     );
 
     const token = jwt.sign({ operator_wallet: address }, secret, {
       expiresIn: "1h",
     });
-
-    // const payload = JSON.stringify({ installToken, address });
-    // const secretIT = process.env.PAYLOAD_SECRET || "my_secret";
-    // const combined = secretIT + payload;
-    // const encodedPayload = Buffer.from(combined).toString("base64");
-
-    // const decoded = Buffer.from(encodedPayload, "base64").toString("utf8");
-    // const secret = "my_secret";
-    // const json = decoded.substring(secret.length);
-    // const data = JSON.parse(json);
-    // const installToken = data.installToken;
-    // const address = data.address;
 
     return res.json({
       success: true,
