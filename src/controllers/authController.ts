@@ -105,14 +105,15 @@ export const verifyWallet = async (req: Request, res: Response) => {
     const secret = process.env.JWT_SECRET || "your_jwt_secret";
 
     const installToken = crypto.randomBytes(32).toString("hex");
-    //const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min expiry
+    const expiresAt = Date.now() + 20 * 60 * 1000; // 20 min expiry
     await pool.query(
       `UPDATE wallet_sessions 
       SET is_verified = true,
           install_token = ?,
-          signature = ?
+          signature = ?,
+          token_expires_at=?
       WHERE session_id = ?`,
-      [installToken, signature, sessionId],
+      [installToken, signature, expiresAt, sessionId],
     );
 
     const token = jwt.sign({ operator_wallet: address }, secret, {
@@ -139,8 +140,7 @@ export const validateInstallToken = async (req: Request, res: Response) => {
 
     const [rows]: any = await pool.query(
       `SELECT * FROM wallet_sessions 
-       WHERE install_token = ?
-       AND token_is_used = false 
+       WHERE install_token = ? 
        AND token_expires_at > ?`,
       [installToken, Date.now()],
     );
@@ -150,7 +150,7 @@ export const validateInstallToken = async (req: Request, res: Response) => {
     // mark as used (one-time)
     await pool.query(
       `UPDATE wallet_sessions 
-       SET token_is_used = true 
+       SET machine_count = machine_count + 1 
        WHERE install_token = ?`,
       [installToken],
     );
