@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS machines (
     worker_id VARCHAR(100),
     fingerprint VARCHAR(255) UNIQUE,
     created_at BIGINT,
+    miner_ip VARCHAR(100),
     public_key TEXT,
     INDEX(operator_wallet)
 );
@@ -111,5 +112,6 @@ CREATE TABLE IF NOT EXISTS wallet_sessions (
     install_token VARCHAR(255),
     machine_count INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    token_expires_at BIGINT,
     signature TEXT
 );

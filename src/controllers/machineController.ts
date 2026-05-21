@@ -271,9 +271,15 @@ export const getMachineIdByWallet = async (req: Request, res: Response) => {
         if (rows.length === 0) {
             return res.status(404).json({ message: "Machine not found" });
         }
+        // return res.json({
+        //     machine_id: rows[0].machine_id,
+        // });
         return res.json({
-            machine_id: rows[0].machine_id,
+            machine_ids: rows.map(
+                (row: any) => row.machine_id
+            ),
         });
+
 
     } catch (error) {
         console.error(error);
@@ -352,32 +358,33 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
 
 export const registerMachine = async (req: Request, res: Response) => {
     try {
-        const { installToken, machineId, publicKey } = req.body;
-        if (!installToken || !machineId || !publicKey) {
+        const { installToken, machineId, publicKey, detectedOS, minerIp } = req.body;
+        if (!installToken || !machineId || !publicKey || !minerIp) {
             return res.status(400).json({ message: "Missing required fields" });
         }
         const [rows]: any = await pool.query(
             `SELECT * FROM wallet_sessions 
-       WHERE install_token = ? 
-       AND token_expires_at > ?`,
+                WHERE install_token = ? 
+                AND token_expires_at > ?`,
             [installToken, Date.now()]
         );
         if (rows.length === 0) {
             return res.status(401).json({ message: "Invalid or expired token" });
         }
         const session = rows[0];
-        const walletAddress = session.address;
+        const walletAddress = session.operator_wallet;
         if (!walletAddress) {
             console.error("Session missing operator_wallet:", session);
             return res.status(500).json({ message: "Wallet address missing in session" });
         }
         await pool.query(
-            `INSERT INTO machines (machine_id, operator_wallet, public_key)
-            VALUES (?, ?, ?)
+            `INSERT INTO machines (machine_id, operator_wallet, public_key, detected_os, miner_ip)
+            VALUES (?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE 
-                machine_id = VALUES(machine_id),
+                detected_os = VALUES(detected_os),
+                miner_ip = VALUES(miner_ip),
                 public_key = VALUES(public_key)`,
-            [machineId, walletAddress.toLowerCase(), publicKey]
+            [machineId, walletAddress.toLowerCase(), publicKey, detectedOS, minerIp]
         );
         return res.json({ success: true });
 
