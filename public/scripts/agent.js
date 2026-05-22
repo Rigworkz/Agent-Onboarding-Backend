@@ -7,12 +7,10 @@ const http = require("http");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS = 30 * 1000;
-const REQUEST_TIMEOUT = 10 * 1000; // 10 s — covers packet loss on LAN
+const REQUEST_TIMEOUT = 10 * 1000;
 const CONFIG_FILE = path.join(__dirname, "config.json");
 const LOG_FILE = path.join(__dirname, "rig-agent.log");
 
-// Miner credentials — kept as constants (set during discovery by installer).
-// If your firmware uses different credentials, update these.
 const MINER_USER = "root";
 const MINER_PASS = "root";
 
@@ -20,11 +18,8 @@ const MINER_PASS = "root";
 let isClaimable = false;
 let verificationDone = false;
 let verificationMessage = "Pending";
-let backendUrl = "http://localhost:3001"; // overwritten by config on startup
+let backendUrl = "http://localhost:3001";
 let lastHeartbeatAt = null;
-
-// Module-scope timer reference so the shutdown handler can clear it
-// regardless of which lifecycle stage we were in when the signal arrived.
 let pollTimer = null;
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
@@ -38,11 +33,35 @@ function log(level, msg) {
 
 // ─── Config loader ───────────────────────────────────────────────────────────
 function loadConfig() {
-  const raw = fs.readFileSync(CONFIG_FILE, "utf8").replace(/^\uFEFF/, ""); // strip BOM
+  const raw = fs.readFileSync(CONFIG_FILE, "utf8").replace(/^\uFEFF/, "");
   return JSON.parse(raw);
 }
 
-// ─── Digest Auth helpers (UNCHANGED from production) ─────────────────────────
+// ─── getMachines ─────────────────────────────────────────────────────────────
+// Returns the machines array from config, normalised to always be an array.
+// Supports both:
+//   New format:  { machines: [ { machine_id, miner_ip, miner_port }, ... ] }
+//   Legacy format: { machine_id, miner_ip, miner_port }  (single-rig installs)
+function getMachines(config) {
+  if (Array.isArray(config.machines) && config.machines.length > 0) {
+    return config.machines;
+  }
+  // Legacy single-machine config — wrap so the rest of the code is uniform.
+  if (config.machine_id && config.miner_ip) {
+    return [
+      {
+        machine_id: config.machine_id,
+        miner_ip: config.miner_ip,
+        miner_port: config.miner_port || 80,
+        miner_type: "unknown",
+        auth_mode: "unknown",
+      },
+    ];
+  }
+  return [];
+}
+
+// ─── Digest Auth helpers ──────────────────────────────────────────────────────
 function parseChallenge(header) {
   const out = {};
   const re = /(\w+)=(?:"([^"]+)"|([^\s,]+))/g;
@@ -66,7 +85,6 @@ function buildAuthHeader(method, uriPath, challenge) {
     .update(`${method}:${uriPath}`)
     .digest("hex");
 
-  // qop=auth path (most common on modern firmware)
   if (qop && qop.includes("auth")) {
     const nc = "00000001";
     const cnonce = crypto.randomBytes(8).toString("hex");
@@ -81,7 +99,6 @@ function buildAuthHeader(method, uriPath, challenge) {
     );
   }
 
-  // qop-absent fallback (older firmware)
   const response = crypto
     .createHash("md5")
     .update(`${ha1}:${nonce}:${ha2}`)
@@ -93,7 +110,7 @@ function buildAuthHeader(method, uriPath, challenge) {
   );
 }
 
-// ─── Low-level HTTP GET with timeout (UNCHANGED) ─────────────────────────────
+// ─── Low-level HTTP GET with timeout ──────────────────────────────────────────
 function httpGet(host, port, uriPath, headers = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -130,7 +147,7 @@ function httpGet(host, port, uriPath, headers = {}) {
   });
 }
 
-// ─── Digest fetch: probe → 401 → authenticated request (UNCHANGED) ───────────
+// ─── Digest-authenticated GET ─────────────────────────────────────────────────
 async function digestGet(host, port, uriPath) {
   const probe = await httpGet(host, port, uriPath);
 
@@ -169,14 +186,23 @@ async function digestGet(host, port, uriPath) {
   return authed.body;
 }
 
-// ─── Fetch & RSA-decrypt wallet address from backend ─────────────────────────
+// ─── Fetch & RSA-decrypt wallet address from backend ──────────────────────────
+// Uses the first machine's machine_id. All machines share the same wallet.
 async function fetchWalletAddress() {
   const config = loadConfig();
   backendUrl = config.backendUrl || backendUrl;
 
-  const machineId = config.machine_id;
+  const machines = getMachines(config);
+  if (machines.length === 0) {
+    throw new Error("No machines found in config.json");
+  }
+
+  // Use first machine's ID to fetch the (shared) encrypted wallet.
+  const machineId = machines[0].machine_id;
   if (!machineId) {
-    throw new Error("machine_id missing from config.json");
+    throw new Error(
+      "machine_id missing from first machine entry in config.json",
+    );
   }
 
   const privateKeyPath = path.join(__dirname, "private_key.pem");
@@ -231,7 +257,7 @@ async function fetchWalletAddress() {
   log("INFO", "Wallet address decrypted successfully");
 }
 
-// ─── Verify install token with backend ───────────────────────────────────────
+// ─── Verify install token with backend ────────────────────────────────────────
 async function verifyWallet() {
   const config = loadConfig();
   backendUrl = config.backendUrl || backendUrl;
@@ -291,7 +317,7 @@ async function verifyWallet() {
 
   isClaimable = parsed.success === true;
   if (parsed.wallet) {
-    global.operatorWallet = parsed.wallet; // secondary fallback if RSA step set it already
+    global.operatorWallet = parsed.wallet;
   }
 
   verificationDone = true;
@@ -302,23 +328,18 @@ async function verifyWallet() {
   log("INFO", `Verification: ${verificationMessage}`);
 }
 
-// ─── Send telemetry payload to backend ───────────────────────────────────────
-async function sendToBackend(heartbeat) {
+// ─── Send telemetry for one machine to backend ────────────────────────────────
+async function sendToBackend(machine, heartbeat) {
   try {
     const config = loadConfig();
 
-    if (!config.machine_id) {
-      throw new Error("machine_id missing in config");
-    }
-
-    const machineId = config.machine_id;
     const decoded = JSON.parse(
       Buffer.from(config.payload, "base64").toString("utf8"),
     );
 
     const payload = {
       machine: {
-        machine_id: machineId,
+        machine_id: machine.machine_id,
         operator: decoded.operator || "unknown",
         pool: decoded.pool || "unknown",
         operator_wallet: global.operatorWallet || "unknown",
@@ -326,7 +347,7 @@ async function sendToBackend(heartbeat) {
         created_at: Date.now(),
       },
       status: {
-        machine_id: machineId,
+        machine_id: machine.machine_id,
         status: heartbeat.status,
         hashrate: heartbeat.metrics.hashrate_ths,
         temperature: heartbeat.metrics.max_chip_temp,
@@ -335,7 +356,7 @@ async function sendToBackend(heartbeat) {
         last_heartbeat: heartbeat.timestamp_ms,
       },
       telemetry: {
-        machine_id: machineId,
+        machine_id: machine.machine_id,
         hashrate: heartbeat.metrics.hashrate_ths,
         rate_avg: heartbeat.metrics.rate_30m_ghs,
         temperature: heartbeat.metrics.max_chip_temp,
@@ -376,44 +397,42 @@ async function sendToBackend(heartbeat) {
       req.end();
     });
 
-    log("INFO", "Telemetry sent to backend");
+    log("INFO", `[${machine.miner_ip}] Telemetry sent`);
     log("INFO", response);
   } catch (err) {
-    // Backend failure must NEVER stop us from polling the miner.
-    log("ERROR", "Failed to send telemetry: " + err.message);
+    log(
+      "ERROR",
+      `[${machine.miner_ip}] Failed to send telemetry: ${err.message}`,
+    );
   }
 }
 
-// ─── Poll miner via real Digest-authenticated API ────────────────────────────
-async function poll() {
+// ─── Poll one machine ─────────────────────────────────────────────────────────
+// Fetches stats from a single miner, builds a heartbeat, ships it to backend.
+// Returns true if the miner responded, false on any error.
+async function pollMachine(machine) {
+  const { machine_id, miner_ip, miner_port = 80 } = machine;
+
   try {
-    const config = loadConfig();
-    const minerHost = config.miner_ip;
-    const minerPort = config.miner_port || 80;
-    const discoveryStatus = config.discovery?.status || "unknown";
-
-    if (!minerHost) {
-      throw new Error(
-        "miner_ip is not set in config.json — miner was not discovered",
-      );
-    }
-
-    const raw = await digestGet(minerHost, minerPort, "/cgi-bin/stats.cgi");
+    const raw = await digestGet(miner_ip, miner_port, "/cgi-bin/stats.cgi");
 
     let data;
     try {
       data = JSON.parse(raw);
     } catch (e) {
-      throw new Error(`Invalid JSON from miner: ${raw.slice(0, 120)}`);
+      throw new Error(
+        `Invalid JSON from miner ${miner_ip}: ${raw.slice(0, 120)}`,
+      );
     }
 
     const stats = data?.STATS?.[0];
     if (!stats) {
-      throw new Error("No STATS[0] in response — unexpected firmware format");
+      throw new Error(
+        `No STATS[0] in response from ${miner_ip} — unexpected firmware format`,
+      );
     }
 
     const hashrate_ghs = stats.rate_avg ?? stats.rate_30m ?? stats.rate_5s ?? 0;
-
     const chains = stats.chain ?? [];
     const temps = chains.flatMap((c) => c.temp_chip ?? []);
     const maxTemp = temps.length ? Math.max(...temps) : 0;
@@ -430,8 +449,6 @@ async function poll() {
       max_chip_temp: maxTemp,
     };
 
-    // Status mirrors the original production agent: a reachable miner with
-    // positive hashrate is ONLINE; reachable-but-zero-hashrate is OFFLINE.
     const now = Date.now();
     const rigStatus = metrics.hashrate_ths > 0 ? "ONLINE" : "OFFLINE";
     lastHeartbeatAt = now;
@@ -439,12 +456,15 @@ async function poll() {
     const heartbeat = {
       batch_id: crypto.randomUUID(),
       timestamp_ms: now,
-      miner_host: minerHost,
-      miner_port: minerPort,
-      // Real Antminer firmware exposes INFO.type ("Antminer S19k Pro"). The
-      // miner_version fallback is defensive coverage for stripped firmwares.
-      miner_type: data?.INFO?.type ?? data?.INFO?.miner_version ?? "unknown",
-      discovery_status: discoveryStatus,
+      machine_id,
+      miner_host: miner_ip,
+      miner_port,
+      miner_type:
+        data?.INFO?.type ??
+        data?.INFO?.miner_version ??
+        machine.miner_type ??
+        "unknown",
+      discovery_status: "found",
       status: rigStatus,
       claimable: isClaimable,
       verification_done: verificationDone,
@@ -454,52 +474,78 @@ async function poll() {
 
     log(
       "INFO",
-      `POLL OK | ${metrics.hashrate_ths.toFixed(2)} TH/s | ` +
-        `hw_err=${metrics.hardware_errors} | temp=${maxTemp}°C | ` +
-        `power=${metrics.watt}W | uptime=${metrics.uptime_sec}s | ` +
-        `claimable=${isClaimable}`,
+      `[${miner_ip}] POLL OK | ${metrics.hashrate_ths.toFixed(2)} TH/s | ` +
+        `temp=${maxTemp}°C | power=${metrics.watt}W | uptime=${metrics.uptime_sec}s`,
     );
 
-    console.log(JSON.stringify(heartbeat, null, 2));
-
-    await sendToBackend(heartbeat);
+    await sendToBackend(machine, heartbeat);
+    return true;
   } catch (err) {
-    log(
-      "ERROR",
-      `Poll failed — retrying in ${POLL_INTERVAL_MS / 1000}s | ${err.message}`,
-    );
+    log("ERROR", `[${miner_ip}] Poll failed: ${err.message}`);
+    return false;
   }
 }
 
+// ─── Poll all machines ────────────────────────────────────────────────────────
+// Iterates through every machine in config.machines[], polls each in parallel,
+// then logs a summary.
+async function poll() {
+  const config = loadConfig();
+  backendUrl = config.backendUrl || backendUrl;
+  const machines = getMachines(config);
+
+  if (machines.length === 0) {
+    log("WARN", "No machines configured — skipping poll");
+    return;
+  }
+
+  log("INFO", `--- Poll cycle start: ${machines.length} machine(s) ---`);
+
+  // Fire all polls concurrently; each handles its own errors internally.
+  const results = await Promise.all(machines.map((m) => pollMachine(m)));
+
+  const online = results.filter(Boolean).length;
+  const offline = results.length - online;
+
+  log(
+    "INFO",
+    `--- Poll cycle end: ${online}/${machines.length} online, ${offline} unreachable ---`,
+  );
+}
+
 // ─── Shutdown handler ────────────────────────────────────────────────────────
-// Registered by start() BEFORE any awaited initialization so Ctrl+C/SIGTERM
-// is honoured at every lifecycle stage, not only after polling has begun.
 function shutdown(signal) {
   log("INFO", `${signal} — stopping.`);
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
-  // Forceful exit. Any in-flight HTTP request to the miner or backend is
-  // abandoned, which is the right behavior for an interrupt — we don't want
-  // a hung backend socket to delay shutdown by up to REQUEST_TIMEOUT.
   process.exit(0);
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 async function start() {
-  log("INFO", "Agent starting...");
+  log("INFO", "Agent starting (multi-rig mode) ...");
 
-  // Register signal handlers FIRST, before any awaited work. Previously
-  // these were registered after startup completed, so a Ctrl+C during
-  // fetchWalletAddress() / verifyWallet() / first poll() bypassed the
-  // cleanup logging. Doing it up-front makes shutdown deterministic at
-  // every lifecycle stage. Safe because pollTimer starts as null and the
-  // handler null-checks before clearing.
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-  // Step 1 — backend init is BEST-EFFORT.
+  // Log discovered machine list on startup.
+  try {
+    const config = loadConfig();
+    const machines = getMachines(config);
+    log("INFO", `Config loaded — ${machines.length} machine(s) configured:`);
+    machines.forEach((m, i) =>
+      log(
+        "INFO",
+        `  [${i + 1}] machine_id=${m.machine_id}  ip=${m.miner_ip}:${m.miner_port || 80}`,
+      ),
+    );
+  } catch (err) {
+    log("ERROR", `Could not read config on startup: ${err.message}`);
+  }
+
+  // Step 1 — backend init is best-effort (wallet + verification).
   try {
     await fetchWalletAddress();
   } catch (err) {
