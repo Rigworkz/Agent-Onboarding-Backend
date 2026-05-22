@@ -164,7 +164,7 @@ function ConvertTo-SpkiPublicKey([System.Security.Cryptography.RSAParameters]$p)
     }
 }
 
-# ─── ProbeScript ─────────────────────────────────────────────────────────────
+# --- ProbeScript ---
 # Runs inside a Start-Job process. Returns a miner object if the host is a
 # valid Antminer, or $null otherwise.
 $ProbeScript = {
@@ -285,7 +285,7 @@ function Get-OrderedPorts {
     return ,$ordered.ToArray()
 }
 
-# ─── Test-MinerEndpoint ──────────────────────────────────────────────────────
+# --- Test-MinerEndpoint ---
 # Probes one IP across all candidate ports in parallel.
 # Returns the first successful miner object, or $null.
 function Test-MinerEndpoint {
@@ -370,9 +370,9 @@ function Get-TcpAliveHosts {
     return $alive
 }
 
-# ─── Discover-AllMiners ──────────────────────────────────────────────────────
-# CHANGED from original: probes EVERY alive host rather than stopping at the
-# first hit. Returns all confirmed miners plus scan metadata.
+# --- Discover-AllMiners ---
+# CHANGED: probes EVERY alive host rather than stopping at the first hit.
+# Returns all confirmed miners plus scan metadata.
 function Discover-AllMiners {
     param([string]$InstallDir)
 
@@ -413,26 +413,26 @@ function Discover-AllMiners {
     Write-Host ""
     Write-Log "INFO" "Scanning $($allHosts.Count) hosts on ports $($MinerPorts -join '/') ..."
 
-    $aliveHosts     = @(Get-TcpAliveHosts -Hosts $allHosts -Ports $MinerPorts -TimeoutMs $TcpConnectTimeoutMs)
+    $aliveHosts       = @(Get-TcpAliveHosts -Hosts $allHosts -Ports $MinerPorts -TimeoutMs $TcpConnectTimeoutMs)
     $meta.alive_hosts = $aliveHosts.Count
 
     if ($aliveHosts.Count -eq 0) {
         Write-Log "WARN" "No hosts with open miner ports found on LAN"
     }
     else {
-        Write-Log "INFO" "$($aliveHosts.Count) host(s) with open ports — verifying each as a miner ..."
+        Write-Log "INFO" "$($aliveHosts.Count) host(s) with open ports - verifying each as a miner ..."
         $checked = 0
 
         foreach ($candidate in $aliveHosts) {
             $checked++
-            # Skip if we already found this IP (e.g. local check above)
             $alreadyFound = $miners | Where-Object { $_.miner_ip -eq $candidate }
             if ($alreadyFound) { continue }
 
             Write-Log "INFO" "  [$checked/$($aliveHosts.Count)] Probing $candidate ..."
             $miner = Test-MinerEndpoint -Ip $candidate
             if ($miner) {
-                Write-Log "OK" "  Miner confirmed: $($miner.miner_ip):$($miner.miner_port) ($($miner.miner_type), auth: $($miner.auth_mode))"
+                $minerDesc = "$($miner.miner_ip):$($miner.miner_port) type=$($miner.miner_type) auth=$($miner.auth_mode)"
+                Write-Log "OK" "  Miner confirmed: $minerDesc"
                 [void]$miners.Add($miner)
             }
         }
@@ -443,7 +443,7 @@ function Discover-AllMiners {
     return [pscustomobject]@{ Miners = $miners.ToArray(); Meta = $meta }
 }
 
-# ─── Resolve-AllMiners ───────────────────────────────────────────────────────
+# --- Resolve-AllMiners ---
 # Handles explicit IP override (comma-separated) OR runs LAN discovery.
 function Resolve-AllMiners {
     param([string]$ExplicitIp, [string]$InstallDir)
@@ -451,7 +451,7 @@ function Resolve-AllMiners {
     if ($ExplicitIp) {
         $ipList = $ExplicitIp -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 
-        Write-Log "INFO" "Manual miner IP(s) provided: $($ipList -join ', ') — skipping LAN scan"
+        Write-Log "INFO" "Manual miner IP(s) provided: $($ipList -join ', ') - skipping LAN scan"
         Write-Host ""
 
         $miners = [System.Collections.Generic.List[object]]::new()
@@ -474,8 +474,7 @@ function Resolve-AllMiners {
                 Write-Log "OK" "  Miner confirmed: $singleIp"
             }
             else {
-                Write-Log "WARN" "  Probe to $singleIp failed — will write config anyway; agent will retry"
-                # Write a stub entry so the agent still attempts to connect
+                Write-Log "WARN" "  Probe to $singleIp failed - will write config anyway; agent will retry"
                 [void]$miners.Add([pscustomobject]@{
                     miner_ip   = $singleIp
                     miner_port = 80
@@ -491,11 +490,8 @@ function Resolve-AllMiners {
     return Discover-AllMiners -InstallDir $InstallDir
 }
 
-# ─── Save-MultiRigConfig ─────────────────────────────────────────────────────
+# --- Save-MultiRigConfig ---
 # Writes config.json with a machines[] array (one entry per discovered miner).
-# Each machine gets its own UUID so the agent and backend can address them
-# independently. The single RSA public key is shared across all machines in
-# this farm (same operator wallet).
 function Save-MultiRigConfig {
     param(
         [string]$InstallDir,
@@ -504,7 +500,7 @@ function Save-MultiRigConfig {
         [string]$PublicKeyB64,
         [object[]]$Miners,
         [object]$Meta,
-        [hashtable]$MachineIds   # ip -> machine_id mapping built during registration
+        [hashtable]$MachineIds
     )
 
     $machines = @()
@@ -560,7 +556,7 @@ function Test-NodeVersion {
     }
 }
 
-# ─── Main ────────────────────────────────────────────────────────────────────
+# --- Main ---
 try {
     if (-not (Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -572,7 +568,7 @@ try {
     Write-Host "  ================================================" -ForegroundColor DarkCyan
     Write-Host ""
 
-    # ── Generate RSA key pair (shared for this farm) ──────────────────────────
+    # Generate RSA key pair (shared for this farm)
     Write-Log "INFO" "Generating RSA key pair ..."
     $rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048)
     try {
@@ -590,12 +586,12 @@ try {
     Set-Content -Path (Join-Path $InstallDir "public_key.pem") -Value $publicKeyPem -Encoding Ascii
     Write-Log "OK" "RSA key pair ready"
 
-    # ── Decode payload early (needed for installToken) ────────────────────────
+    # Decode payload early (needed for installToken)
     $decoded      = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload))
     $installToken = ($decoded | ConvertFrom-Json).installToken
     if (-not $installToken) { throw "installToken missing from payload" }
 
-    # ── Discover all miners ───────────────────────────────────────────────────
+    # Discover all miners
     Write-Log "INFO" "Resolving miner endpoint(s) ..."
     Write-Host ""
 
@@ -607,23 +603,20 @@ try {
     if ($miners.Count -eq 0) {
         Write-Log "WARN" "No miners found on this network."
         Write-Log "INFO" "Tip: re-run with -MinerIp <ip1,ip2,...> if miners are on a different subnet."
-        # Still continue — user might want the agent installed and configured manually.
     }
     else {
         Write-Log "OK" "Found $($miners.Count) miner(s):"
         foreach ($m in $miners) {
-            Write-Log "OK" "  $($m.miner_ip):$($m.miner_port)  type=$($m.miner_type)  auth=$($m.auth_mode)"
+            $desc = "$($m.miner_ip):$($m.miner_port)  type=$($m.miner_type)  auth=$($m.auth_mode)"
+            Write-Log "OK" "  $desc"
         }
     }
 
-    # ── Register every miner with the backend ─────────────────────────────────
-    # Each miner gets a unique machine_id UUID. All share the same RSA public
-    # key (one key pair per farm). installToken is reused for every call;
-    # the backend must not mark it used until all registrations are done.
+    # Register every miner with the backend
     Write-Host ""
     Write-Log "INFO" "Registering $($miners.Count) miner(s) with backend ..."
 
-    $machineIds     = @{}   # ip -> machine_id
+    $machineIds      = @{}
     $registeredCount = 0
 
     foreach ($miner in $miners) {
@@ -654,12 +647,11 @@ try {
 
             $machineIds[$miner.miner_ip] = $machineId
             $registeredCount++
-            Write-Log "OK" "  Registered $($miner.miner_ip) → machine_id: $machineId"
+            Write-Log "OK" "  Registered $($miner.miner_ip) - machine_id: $machineId"
         }
         catch {
             Write-Log "ERR" "  Failed to register $($miner.miner_ip): $($_.Exception.Message)"
             # Assign a local-only machine_id so the agent can still poll the miner
-            # even if the backend registration failed; telemetry will be retried.
             $machineIds[$miner.miner_ip] = [guid]::NewGuid().ToString()
         }
     }
@@ -667,18 +659,18 @@ try {
     Write-Host ""
     Write-Log "INFO" "Registration complete: $registeredCount / $($miners.Count) succeeded"
 
-    # ── Write multi-machine config.json ───────────────────────────────────────
+    # Write multi-machine config.json
     Write-Log "INFO" "Saving config ..."
     Save-MultiRigConfig `
-        -InstallDir  $InstallDir `
-        -Payload     $Payload `
-        -BackendUrl  $BackendUrl `
+        -InstallDir   $InstallDir `
+        -Payload      $Payload `
+        -BackendUrl   $BackendUrl `
         -PublicKeyB64 $publicKeyB64 `
-        -Miners      $miners `
-        -Meta        $result.Meta `
-        -MachineIds  $machineIds
+        -Miners       $miners `
+        -Meta         $result.Meta `
+        -MachineIds   $machineIds
 
-    # ── Download agent ────────────────────────────────────────────────────────
+    # Download agent
     Write-Log "INFO" "Downloading agent ..."
     $agentDest = Join-Path $InstallDir "agent.js"
     Invoke-WebRequest -Uri $AgentUrl -OutFile $agentDest
@@ -691,12 +683,12 @@ try {
     }
     Write-Log "INFO" "Node.js $($nodeCheck.version) detected"
 
-    # ── Launch agent ──────────────────────────────────────────────────────────
+    # Launch agent
     Write-Log "INFO" "Launching agent process ..."
     Start-Process -FilePath "node" -ArgumentList "`"$agentDest`"" -WorkingDirectory $InstallDir
 
     Write-Host ""
-    Write-Log "OK" "Agent is running — monitoring $($miners.Count) miner(s). All done."
+    Write-Log "OK" "Agent is running - monitoring $($miners.Count) miner(s). All done."
     Write-Host ""
 }
 catch {
