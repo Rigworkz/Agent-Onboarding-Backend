@@ -1,7 +1,13 @@
 $sid = $null
 
-if ($MyInvocation.Line -match "sid=([^\"&]+)") {
+# Try from query string (more reliable)
+if ($env:__PSCommandLine -match 'sid=([^"&]+)') {
     $sid = $matches[1]
+}
+
+# fallback
+if (-not $sid -and $args.Count -gt 0) {
+    $sid = $args[0]
 }
 
 if (-not $sid) {
@@ -37,22 +43,26 @@ if (-not $res.installToken) {
     exit 1
 }
 
+$payloadObj = @{
+    installToken = $res.installToken
+}
+
 $payload = [Convert]::ToBase64String(
     [System.Text.Encoding]::UTF8.GetBytes(
-        "{""installToken"":""$($res.installToken)""}"
+        ($payloadObj | ConvertTo-Json -Compress)
     )
 )
-
-if (-not (Test-Path $tempFile)) {
-    Write-Host "Installer download failed" -ForegroundColor Red
-    exit 1
-}
 
 Write-Host "Downloading installer..." -ForegroundColor Cyan
 
 Invoke-WebRequest `
     -Uri "$backend/scripts/rigworkz-install.ps1" `
     -OutFile $tempFile
+
+if (-not (Test-Path $tempFile)) {
+    Write-Host "Installer download failed" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "Running installer..." -ForegroundColor Cyan
 
