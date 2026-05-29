@@ -1,6 +1,13 @@
-param(
-    [string]$sid
-)
+$sid = $null
+
+if ($MyInvocation.Line -match "sid=([^\"&]+)") {
+    $sid = $matches[1]
+}
+
+if (-not $sid) {
+    Write-Host "Missing session id" -ForegroundColor Red
+    exit 1
+}
 
 # fallback if param not bound
 if (-not $sid -and $args.Count -gt 0) {
