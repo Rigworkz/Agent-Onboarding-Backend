@@ -1,21 +1,38 @@
-import { Router } from 'express';
-import { getHealth } from '../controllers/healthController';
-import { login, getNonce } from '../controllers/authController';
-import { authenticateToken } from '../middleware/auth';
-import { verifyWallet, validateInstallToken } from '../controllers/authController';
-import { onboardMachine, getMachine, getEncryptedAddress, getAllMachines, getMachineStatus, getMachineTelemetry, generateAndSaveFingerprint, getMachineIdByWallet, registerMachine } from '../controllers/machineController';
+import { Router } from "express";
+import { getHealth } from "../controllers/healthController";
+import { login, getNonce } from "../controllers/authController";
+import { authenticateToken } from "../middleware/auth";
+import {
+  verifyWallet,
+  validateInstallToken,
+  bootstrapInstall,
+} from "../controllers/authController";
+import {
+  onboardMachine,
+  getMachine,
+  getEncryptedAddress,
+  getAllMachines,
+  getMachineStatus,
+  getMachineTelemetry,
+  generateAndSaveFingerprint,
+  getMachineIdByWallet,
+  registerMachine,
+} from "../controllers/machineController";
 
-import { upsertOperatorProfile, getOperatorProfile } from '../controllers/operatorController';
-
+import {
+  upsertOperatorProfile,
+  getOperatorProfile,
+} from "../controllers/operatorController";
 
 const router = Router();
 
-router.get('/health', getHealth);
+router.get("/health", getHealth);
 
 //router.post('/auth/login', login);
-router.get('/auth/nonce', getNonce);
-router.post('/auth/verify', verifyWallet);
-router.post('/validate-token', validateInstallToken);
+router.get("/auth/nonce", getNonce);
+router.post("/auth/verify", verifyWallet);
+router.post("/validate-token", validateInstallToken);
+router.get("/install/bootstrap", bootstrapInstall);
 
 router.post("/generate-hash", authenticateToken, generateAndSaveFingerprint);
 router.post("/register", registerMachine);
@@ -23,26 +40,26 @@ router.get("/encrypted-address", getEncryptedAddress);
 
 // Example protected route
 
-router.get('/protected', authenticateToken, (req, res) => {
-    res.json({ message: 'This is a protected route', user: (req as any).user });
+router.get("/protected", authenticateToken, (req, res) => {
+  res.json({ message: "This is a protected route", user: (req as any).user });
 });
 
 //router.post('/onboard', authenticateToken, onboardMachine);
-router.post('/onboard', onboardMachine);
+router.post("/onboard", onboardMachine);
 
-router.get('/machine/:machine_id', authenticateToken, getMachine);
+router.get("/machine/:machine_id", authenticateToken, getMachine);
 
-router.get('/machine/:machine_id/status', authenticateToken, getMachineStatus);
+router.get("/machine/:machine_id/status", authenticateToken, getMachineStatus);
 
 //router.get('/wallet/:address/machines', authenticateToken, getMachineIdByWallet);
-router.get('/wallet/:address/machines', getMachineIdByWallet);
+router.get("/wallet/:address/machines", getMachineIdByWallet);
 
 //operator roots
 
-router.post('/operator/profile', authenticateToken, upsertOperatorProfile);
+router.post("/operator/profile", authenticateToken, upsertOperatorProfile);
 
-router.get('/operator/:operator_wallet', authenticateToken, getOperatorProfile);
+router.get("/operator/:operator_wallet", authenticateToken, getOperatorProfile);
 
-router.get('/machines', authenticateToken, getAllMachines);
+router.get("/machines", authenticateToken, getAllMachines);
 
 export default router;

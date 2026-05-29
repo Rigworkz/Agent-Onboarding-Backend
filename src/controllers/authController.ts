@@ -161,3 +161,38 @@ export const validateInstallToken = async (req: Request, res: Response) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
+
+export const bootstrapInstall = async (req: Request, res: Response) => {
+  try {
+    const { sid } = req.query;
+
+    if (!sid || typeof sid !== "string") {
+      return res.status(400).json({ message: "session id required" });
+    }
+
+    const [rows]: any = await pool.query(
+      `SELECT install_token, token_expires_at 
+       FROM wallet_sessions 
+       WHERE session_id = ? AND is_verified = true`,
+      [sid],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "session not found" });
+    }
+
+    const session = rows[0];
+
+    if (!session.install_token || session.token_expires_at < Date.now()) {
+      return res.status(401).json({ message: "token expired or missing" });
+    }
+
+    return res.json({
+      success: true,
+      installToken: session.install_token,
+    });
+  } catch (err) {
+    console.error("bootstrap error:", err);
+    return res.status(500).json({ message: "internal error" });
+  }
+};
