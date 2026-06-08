@@ -2,6 +2,8 @@ param(
     [string]$Payload,
     [string]$BackendUrl = "http://35.224.207.37:5000",
     [string]$AgentUrl = "http://35.224.207.37:5000/scripts/agent.js",
+    # [string]$BackendUrl = "http://localhost:5000",
+    # [string]$AgentUrl = "http://localhost:5000/scripts/agent.js",
     [string]$InstallDir = "C:\rigworkz-agent",
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
@@ -27,8 +29,8 @@ function Write-Log {
     $color = switch ($Level) {
         "INFO" { "Cyan" }
         "WARN" { "Yellow" }
-        "OK"   { "Green" }
-        "ERR"  { "Red" }
+        "OK" { "Green" }
+        "ERR" { "Red" }
         default { "White" }
     }
     Write-Host ("[{0}]  {1}" -f $ts, $Message) -ForegroundColor $color
@@ -40,13 +42,13 @@ function Get-PrimaryIPv4Config {
     }
 
     $cfg = Get-NetIPConfiguration |
-        Where-Object {
-            $_.IPv4Address -and
-            $_.IPv4DefaultGateway -and
-            $_.NetAdapter.Status -eq "Up" -and
-            $_.InterfaceAlias -notmatch "Tailscale|Loopback"
-        } |
-        Select-Object -First 1
+    Where-Object {
+        $_.IPv4Address -and
+        $_.IPv4DefaultGateway -and
+        $_.NetAdapter.Status -eq "Up" -and
+        $_.InterfaceAlias -notmatch "Tailscale|Loopback"
+    } |
+    Select-Object -First 1
 
     if (-not $cfg) {
         throw "No active IPv4 adapter found. Re-run with -MinerIp <ip> to bypass auto-discovery."
@@ -60,9 +62,9 @@ function Get-MaskBytesFromPrefixLength {
     $mask = New-Object byte[] 4
     for ($i = 0; $i -lt 4; $i++) {
         $bits = $PrefixLength - ($i * 8)
-        if ($bits -ge 8)      { $mask[$i] = 255 }
-        elseif ($bits -le 0)  { $mask[$i] = 0   }
-        else                  { $mask[$i] = [byte](256 - [int][math]::Pow(2, 8 - $bits)) }
+        if ($bits -ge 8) { $mask[$i] = 255 }
+        elseif ($bits -le 0) { $mask[$i] = 0 }
+        else { $mask[$i] = [byte](256 - [int][math]::Pow(2, 8 - $bits)) }
     }
     return $mask
 }
@@ -84,20 +86,20 @@ function Convert-UInt32ToIp {
 function Get-SubnetHosts {
     param([string]$Ip, [int]$PrefixLength)
 
-    $ipBytes   = [System.Net.IPAddress]::Parse($Ip).GetAddressBytes()
+    $ipBytes = [System.Net.IPAddress]::Parse($Ip).GetAddressBytes()
     $maskBytes = Get-MaskBytesFromPrefixLength -PrefixLength $PrefixLength
 
-    $networkBytes  = New-Object byte[] 4
+    $networkBytes = New-Object byte[] 4
     $wildcardBytes = New-Object byte[] 4
     for ($i = 0; $i -lt 4; $i++) {
-        $networkBytes[$i]  = $ipBytes[$i] -band $maskBytes[$i]
+        $networkBytes[$i] = $ipBytes[$i] -band $maskBytes[$i]
         $wildcardBytes[$i] = 255 - $maskBytes[$i]
     }
 
-    $networkInt  = Convert-BytesToUInt32 -Bytes $networkBytes
+    $networkInt = Convert-BytesToUInt32 -Bytes $networkBytes
     $wildcardInt = Convert-BytesToUInt32 -Bytes $wildcardBytes
     $start = [uint64]$networkInt + 1
-    $end   = [uint64]$networkInt + [uint64]$wildcardInt - 1
+    $end = [uint64]$networkInt + [uint64]$wildcardInt - 1
 
     $hosts = New-Object System.Collections.Generic.List[string]
     for ($n = $start; $n -le $end; $n++) {
@@ -111,7 +113,7 @@ function Get-Md5Hex {
     $md5 = [System.Security.Cryptography.MD5]::Create()
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-        $hash  = $md5.ComputeHash($bytes)
+        $hash = $md5.ComputeHash($bytes)
         return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
     }
     finally { $md5.Dispose() }
@@ -119,7 +121,7 @@ function Get-Md5Hex {
 
 # DER/ASN.1 helpers for RSA key export
 function ConvertTo-DerLength([int]$n) {
-    if ($n -lt 0x80)  { return [byte[]]@($n) }
+    if ($n -lt 0x80) { return [byte[]]@($n) }
     if ($n -lt 0x100) { return [byte[]]@(0x81, $n) }
     return [byte[]]@(0x82, ($n -shr 8), ($n -band 0xFF))
 }
@@ -139,13 +141,13 @@ function ConvertTo-DerSequence([byte[]]$b) {
 function ConvertTo-Pkcs1PrivateKeyPem([System.Security.Cryptography.RSAParameters]$p) {
     $der = ConvertTo-DerSequence (
         [byte[]]@(0x02, 0x01, 0x00) +
-        (ConvertTo-DerInteger $p.Modulus)  +
+        (ConvertTo-DerInteger $p.Modulus) +
         (ConvertTo-DerInteger $p.Exponent) +
-        (ConvertTo-DerInteger $p.D)        +
-        (ConvertTo-DerInteger $p.P)        +
-        (ConvertTo-DerInteger $p.Q)        +
-        (ConvertTo-DerInteger $p.DP)       +
-        (ConvertTo-DerInteger $p.DQ)       +
+        (ConvertTo-DerInteger $p.D) +
+        (ConvertTo-DerInteger $p.P) +
+        (ConvertTo-DerInteger $p.Q) +
+        (ConvertTo-DerInteger $p.DP) +
+        (ConvertTo-DerInteger $p.DQ) +
         (ConvertTo-DerInteger $p.InverseQ)
     )
     $b64 = [Convert]::ToBase64String($der, [Base64FormattingOptions]::InsertLineBreaks)
@@ -153,11 +155,11 @@ function ConvertTo-Pkcs1PrivateKeyPem([System.Security.Cryptography.RSAParameter
 }
 
 function ConvertTo-SpkiPublicKey([System.Security.Cryptography.RSAParameters]$p) {
-    $rsaPub    = ConvertTo-DerSequence ((ConvertTo-DerInteger $p.Modulus) + (ConvertTo-DerInteger $p.Exponent))
+    $rsaPub = ConvertTo-DerSequence ((ConvertTo-DerInteger $p.Modulus) + (ConvertTo-DerInteger $p.Exponent))
     $bitString = @([byte]0x03) + (ConvertTo-DerLength ($rsaPub.Length + 1)) + @([byte]0x00) + $rsaPub
-    $oid       = [byte[]]@(0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00)
-    $algId     = ConvertTo-DerSequence $oid
-    $spkiDer   = ConvertTo-DerSequence ($algId + $bitString)
+    $oid = [byte[]]@(0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00)
+    $algId = ConvertTo-DerSequence $oid
+    $spkiDer = ConvertTo-DerSequence ($algId + $bitString)
     return @{
         Pem    = "-----BEGIN PUBLIC KEY-----`n$([Convert]::ToBase64String($spkiDer, [Base64FormattingOptions]::InsertLineBreaks))`n-----END PUBLIC KEY-----"
         Base64 = [Convert]::ToBase64String($spkiDer)
@@ -180,7 +182,7 @@ $ProbeScript = {
         $md5 = [System.Security.Cryptography.MD5]::Create()
         try {
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
-            $hash  = $md5.ComputeHash($bytes)
+            $hash = $md5.ComputeHash($bytes)
             return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
         }
         finally { $md5.Dispose() }
@@ -198,35 +200,35 @@ $ProbeScript = {
         $ha1 = Get-Md5Hex "$user`:$($ch.realm)`:$pass"
         $ha2 = Get-Md5Hex "$method`:$uriPath"
         if ($ch.qop -and $ch.qop -like "*auth*") {
-            $nc     = "00000001"
+            $nc = "00000001"
             $cnonce = ([guid]::NewGuid().ToString("N")).Substring(0, 16)
-            $resp   = Get-Md5Hex "$ha1`:$($ch.nonce)`:$nc`:$cnonce`:auth`:$ha2"
+            $resp = Get-Md5Hex "$ha1`:$($ch.nonce)`:$nc`:$cnonce`:auth`:$ha2"
             return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", qop=auth, nc={4}, cnonce="{5}", response="{6}"' -f `
-                $user, $ch.realm, $ch.nonce, $uriPath, $nc, $cnonce, $resp)
+                    $user, $ch.realm, $ch.nonce, $uriPath, $nc, $cnonce, $resp)
         }
         $resp = Get-Md5Hex "$ha1`:$($ch.nonce)`:$ha2"
         return ('Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}"' -f `
-            $user, $ch.realm, $ch.nonce, $uriPath, $resp)
+                $user, $ch.realm, $ch.nonce, $uriPath, $resp)
     }
 
     function Invoke-RawGet([string]$url, [string]$authHeader = $null, [int]$timeoutMs = 5000) {
         $req = [System.Net.HttpWebRequest]::Create($url)
-        $req.Method  = "GET"
+        $req.Method = "GET"
         $req.Timeout = $timeoutMs
         $req.AllowAutoRedirect = $false
         if ($authHeader) { $req.Headers["Authorization"] = $authHeader }
 
         try {
-            $resp   = $req.GetResponse()
+            $resp = $req.GetResponse()
             $stream = $resp.GetResponseStream()
-            $body   = (New-Object System.IO.StreamReader $stream).ReadToEnd()
+            $body = (New-Object System.IO.StreamReader $stream).ReadToEnd()
             $resp.Close()
             return @{ ok = $true; body = $body }
         }
         catch [System.Net.WebException] {
             $webResp = $_.Exception.Response
             if ($null -eq $webResp) { return @{ ok = $false; statusCode = 0; wwwAuth = $null } }
-            $code    = [int]$webResp.StatusCode
+            $code = [int]$webResp.StatusCode
             $wwwAuth = $webResp.Headers["WWW-Authenticate"]
             $webResp.Close()
             return @{ ok = $false; statusCode = $code; wwwAuth = $wwwAuth }
@@ -237,7 +239,7 @@ $ProbeScript = {
     }
 
     $uriPath = "/cgi-bin/stats.cgi"
-    $url     = "http://$Ip`:$Port$uriPath"
+    $url = "http://$Ip`:$Port$uriPath"
 
     $probe = Invoke-RawGet -url $url -timeoutMs $EndpointTimeoutMs
 
@@ -246,7 +248,7 @@ $ProbeScript = {
             $json = $probe.body | ConvertFrom-Json -ErrorAction Stop
             if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
                 $minerType = if ($json.INFO.type) { $json.INFO.type } else { "unknown" }
-                return [pscustomobject]@{ miner_ip=$Ip; miner_port=$Port; miner_type=$minerType; auth_mode="open" }
+                return [pscustomobject]@{ miner_ip = $Ip; miner_port = $Port; miner_type = $minerType; auth_mode = "open" }
             }
         }
         catch {}
@@ -257,9 +259,9 @@ $ProbeScript = {
         return $null
     }
 
-    $ch      = Parse-AuthChallenge $probe.wwwAuth
+    $ch = Parse-AuthChallenge $probe.wwwAuth
     $authHdr = Build-DigestHeader "GET" $uriPath $ch $MinerUser $MinerPass
-    $authed  = Invoke-RawGet -url $url -authHeader $authHdr -timeoutMs $EndpointTimeoutMs
+    $authed = Invoke-RawGet -url $url -authHeader $authHdr -timeoutMs $EndpointTimeoutMs
 
     if (-not $authed.ok) { return $null }
 
@@ -267,7 +269,7 @@ $ProbeScript = {
         $json = $authed.body | ConvertFrom-Json -ErrorAction Stop
         if ($json -and $json.STATS -and @($json.STATS).Count -gt 0) {
             $minerType = if ($json.INFO.type) { $json.INFO.type } else { "unknown" }
-            return [pscustomobject]@{ miner_ip=$Ip; miner_port=$Port; miner_type=$minerType; auth_mode="digest" }
+            return [pscustomobject]@{ miner_ip = $Ip; miner_port = $Port; miner_type = $minerType; auth_mode = "digest" }
         }
     }
     catch {}
@@ -282,7 +284,7 @@ function Get-OrderedPorts {
     foreach ($p in $Ports) {
         if ($p -gt 0 -and -not $ordered.Contains($p)) { [void]$ordered.Add($p) }
     }
-    return ,$ordered.ToArray()
+    return , $ordered.ToArray()
 }
 
 # --- Test-MinerEndpoint ---
@@ -291,13 +293,13 @@ function Get-OrderedPorts {
 function Test-MinerEndpoint {
     param([string]$Ip, [int]$PreferredPort = 0)
 
-    $ports     = Get-OrderedPorts -PreferredPort $PreferredPort -Ports $MinerPorts
+    $ports = Get-OrderedPorts -PreferredPort $PreferredPort -Ports $MinerPorts
     $timeoutMs = $EndpointTimeoutSec * 1000
-    $jobs      = @()
+    $jobs = @()
 
     foreach ($port in $ports) {
         $jobs += Start-Job -ScriptBlock $ProbeScript `
-                           -ArgumentList $Ip, $port, $timeoutMs, $MinerUser, $MinerPass
+            -ArgumentList $Ip, $port, $timeoutMs, $MinerUser, $MinerPass
     }
 
     try {
@@ -376,9 +378,9 @@ function Get-TcpAliveHosts {
 function Discover-AllMiners {
     param([string]$InstallDir)
 
-    $cfg     = Get-PrimaryIPv4Config
-    $ip      = $cfg.IPv4Address.IPAddress
-    $prefix  = $cfg.IPv4Address.PrefixLength
+    $cfg = Get-PrimaryIPv4Config
+    $ip = $cfg.IPv4Address.IPAddress
+    $prefix = $cfg.IPv4Address.PrefixLength
     $gateway = $cfg.IPv4DefaultGateway.NextHop
 
     Write-Log "INFO" "Adapter    : $($cfg.InterfaceAlias)"
@@ -407,13 +409,13 @@ function Discover-AllMiners {
 
     # Parallel TCP sweep of the whole subnet
     $allHosts = @(Get-SubnetHosts -Ip $ip -PrefixLength $prefix |
-                  Where-Object { $_ -ne $ip -and $_ -ne $gateway })
+        Where-Object { $_ -ne $ip -and $_ -ne $gateway })
     $meta.total_hosts = $allHosts.Count
 
     Write-Host ""
     Write-Log "INFO" "Scanning $($allHosts.Count) hosts on ports $($MinerPorts -join '/') ..."
 
-    $aliveHosts       = @(Get-TcpAliveHosts -Hosts $allHosts -Ports $MinerPorts -TimeoutMs $TcpConnectTimeoutMs)
+    $aliveHosts = @(Get-TcpAliveHosts -Hosts $allHosts -Ports $MinerPorts -TimeoutMs $TcpConnectTimeoutMs)
     $meta.alive_hosts = $aliveHosts.Count
 
     if ($aliveHosts.Count -eq 0) {
@@ -455,7 +457,7 @@ function Resolve-AllMiners {
         Write-Host ""
 
         $miners = [System.Collections.Generic.List[object]]::new()
-        $meta   = @{
+        $meta = @{
             method        = "manual-override"
             adapter       = "manual-override"
             subnet        = "manual-override"
@@ -476,11 +478,11 @@ function Resolve-AllMiners {
             else {
                 Write-Log "WARN" "  Probe to $singleIp failed - will write config anyway; agent will retry"
                 [void]$miners.Add([pscustomobject]@{
-                    miner_ip   = $singleIp
-                    miner_port = 80
-                    miner_type = "unknown"
-                    auth_mode  = "unknown"
-                })
+                        miner_ip   = $singleIp
+                        miner_port = 80
+                        miner_type = "unknown"
+                        auth_mode  = "unknown"
+                    })
             }
         }
 
@@ -541,7 +543,7 @@ function Test-NodeVersion {
         return @{ ok = $false; reason = "Node.js is not installed or not in PATH" }
     }
     try {
-        $raw   = (& node --version) 2>$null
+        $raw = (& node --version) 2>$null
         $clean = $raw.TrimStart('v').Trim()
         $parts = $clean.Split('.')
         $major = [int]$parts[0]
@@ -572,11 +574,11 @@ try {
     Write-Log "INFO" "Generating RSA key pair ..."
     $rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048)
     try {
-        $rsaParams     = $rsa.ExportParameters($true)
+        $rsaParams = $rsa.ExportParameters($true)
         $privateKeyPem = ConvertTo-Pkcs1PrivateKeyPem -p $rsaParams
-        $pubKey        = ConvertTo-SpkiPublicKey -p $rsaParams
-        $publicKeyPem  = $pubKey.Pem
-        $publicKeyB64  = $pubKey.Base64
+        $pubKey = ConvertTo-SpkiPublicKey -p $rsaParams
+        $publicKeyPem = $pubKey.Pem
+        $publicKeyB64 = $pubKey.Base64
     }
     finally { $rsa.Dispose() }
 
@@ -587,7 +589,7 @@ try {
     Write-Log "OK" "RSA key pair ready"
 
     # Decode payload early (needed for installToken)
-    $decoded      = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload))
+    $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload))
     $installToken = ($decoded | ConvertFrom-Json).installToken
     if (-not $installToken) { throw "installToken missing from payload" }
 
@@ -596,7 +598,7 @@ try {
     Write-Host ""
 
     $result = Resolve-AllMiners -ExplicitIp $MinerIp -InstallDir $InstallDir
-    $miners  = @($result.Miners)
+    $miners = @($result.Miners)
 
     Write-Host ""
 
@@ -616,7 +618,7 @@ try {
     Write-Host ""
     Write-Log "INFO" "Registering $($miners.Count) miner(s) with backend ..."
 
-    $machineIds      = @{}
+    $machineIds = @{}
     $registeredCount = 0
 
     foreach ($miner in $miners) {

@@ -4,6 +4,7 @@ import { pool } from "../config/database";
 import { RowDataPacket } from "mysql2";
 import { buildUpsertQuery } from "../utils/queryBuilder";
 import * as crypto from "crypto";
+import { machineToSocket } from "../websocket/socketServer";
 
 /* ================= INTERFACES ================= */
 
@@ -362,6 +363,7 @@ export const registerMachine = async (req: Request, res: Response) => {
         if (!installToken || !machineId || !publicKey || !minerIp) {
             return res.status(400).json({ message: "Missing required fields" });
         }
+
         const [rows]: any = await pool.query(
             `SELECT * FROM wallet_sessions 
                 WHERE install_token = ? 
@@ -430,5 +432,163 @@ export const getEncryptedAddress = async (req: Request, res: Response) => {
     } catch (error) {
         console.error("Encryption error: ", error);
         return res.status(500).json({ message: "Internal Server error" });
+    }
+};
+
+
+
+export const runConnectivityTest = async (req: Request, res: Response) => {
+    let connection;
+
+    try {
+        const { walletAddress } = req.body;
+
+        if (!walletAddress) {
+            return res.status(400).json({
+                success: false,
+                message: "Wallet address is required",
+            });
+        }
+
+        connection = await pool.getConnection();
+
+        const [machineRows]: any = await connection.execute(
+            `
+            SELECT *
+            FROM machines
+            WHERE operator_wallet = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [walletAddress]
+        );
+
+        if (machineRows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Machine not found",
+            });
+        }
+
+        const machine = machineRows[0];
+
+        const ws = machineToSocket.get(machine.machine_id);
+
+        if (!ws) {
+            return res.status(400).json({
+                success: false,
+                message: "Agent is offline",
+            });
+        }
+
+        const testRunId = crypto.randomUUID();
+        const challengeNonce = crypto.randomUUID();
+
+        await connection.execute(
+            `INSERT INTO connectivity_tests(
+                test_run_id,
+                machine_id,
+                challenge_nonce,
+                status
+            ) VALUES(
+                ?, ?, ?, ?
+            )`, [testRunId, machine.machine_id, challengeNonce, "PENDING"]
+        );
+
+        console.log(
+            `Starting connectivity test ${testRunId} for machine ${machine.machine_id}`
+        );
+        ws.send(
+            JSON.stringify({
+                action: "CHALLENGE_REQUEST",
+                machine_id: machine.machine_id,
+                testRunId,
+                challengeNonce,
+            })
+        );
+
+        console.log(
+            `Connectivity test started for machine ${machine.machine_id}`
+        );
+
+        return res.status(200).json({
+            success: true,
+            machineId: machine.machine_id,
+            testRunId,
+            status: "RUNNING",
+            message: "Connectivity test started",
+        });
+    } catch (error) {
+        console.error("Connectivity test failed:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error",
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
+    }
+};
+
+export const getConnectivityTestResult = async (
+    req: Request,
+    res: Response
+) => {
+    let connection;
+
+    try {
+        const { testRunId } = req.params;
+
+        connection = await pool.getConnection();
+
+        const [rows]: any = await connection.execute(
+            `
+            SELECT
+                test_run_id,
+                status,
+                network_result,
+                security_result,
+                heartbeat_result,
+                completed_at
+            FROM connectivity_tests
+            WHERE test_run_id = ?
+            LIMIT 1
+            `,
+            [testRunId]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Test not found",
+            });
+        }
+
+        const test = rows[0];
+
+        return res.status(200).json({
+            success: true,
+            testRunId: test.test_run_id,
+            status: test.status,
+
+            network: Boolean(test.network_result),
+            security: Boolean(test.security_result),
+            heartbeat: Boolean(test.heartbeat_result),
+
+            completedAt: test.completed_at,
+        });
+
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error",
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
     }
 };
