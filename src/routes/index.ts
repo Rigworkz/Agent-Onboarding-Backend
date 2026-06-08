@@ -7,6 +7,7 @@ import {
   validateInstallToken,
   bootstrapInstall,
 } from "../controllers/authController";
+
 import {
   onboardMachine,
   getMachine,
@@ -17,7 +18,14 @@ import {
   generateAndSaveFingerprint,
   getMachineIdByWallet,
   registerMachine,
+  runConnectivityTest,
+  getConnectivityTestResult,
 } from "../controllers/machineController";
+
+import {
+  upsertOperatorProfile,
+  getOperatorProfile,
+} from "../controllers/operatorController";
 
 import {
   upsertOperatorProfile,
@@ -51,6 +59,16 @@ router.get("/machine/:machine_id", authenticateToken, getMachine);
 
 router.get("/machine/:machine_id/status", authenticateToken, getMachineStatus);
 
+router.post(
+  "/run-connectivity-test",
+  authenticateToken,
+  runConnectivityTest
+);
+
+router.get(
+  "/connectivity-test/:testRunId",
+  getConnectivityTestResult
+);
 //router.get('/wallet/:address/machines', authenticateToken, getMachineIdByWallet);
 router.get("/wallet/:address/machines", getMachineIdByWallet);
 

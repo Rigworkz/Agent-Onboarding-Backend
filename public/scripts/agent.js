@@ -1,5 +1,8 @@
 "use strict";
 
+const WebSocket = require("ws"); //websocket
+let ws;
+
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -18,7 +21,8 @@ const MINER_PASS = "root";
 let isClaimable = false;
 let verificationDone = false;
 let verificationMessage = "Pending";
-let backendUrl = "http://localhost:3001";
+let backendUrl = "http://35.224.207.37:5000";
+//let backendUrl = "http://localhost:5000";
 let lastHeartbeatAt = null;
 let pollTimer = null;
 
@@ -28,7 +32,7 @@ function log(level, msg) {
   console.log(line);
   try {
     fs.appendFileSync(LOG_FILE, line + "\n");
-  } catch (_) {}
+  } catch (_) { }
 }
 
 // ─── Config loader ───────────────────────────────────────────────────────────
@@ -179,12 +183,14 @@ async function digestGet(host, port, uriPath) {
   if (authed.status !== 200) {
     throw new Error(
       `Digest auth failed on ${uriPath} — HTTP ${authed.status}. ` +
-        `Check MINER_USER / MINER_PASS constants.`,
+      `Check MINER_USER / MINER_PASS constants.`,
     );
   }
 
   return authed.body;
 }
+
+
 
 // ─── Fetch & RSA-decrypt wallet address from backend ──────────────────────────
 // Uses the first machine's machine_id. All machines share the same wallet.
@@ -259,6 +265,7 @@ async function fetchWalletAddress() {
 
 // ─── Verify install token with backend ────────────────────────────────────────
 async function verifyWallet() {
+
   const config = loadConfig();
   backendUrl = config.backendUrl || backendUrl;
 
@@ -289,7 +296,7 @@ async function verifyWallet() {
     const req = http.request(
       {
         hostname: url.hostname,
-        port: url.port || 3001,
+        port: url.port || 5000,
         path: url.pathname,
         method: "POST",
         headers: {
@@ -373,7 +380,7 @@ async function sendToBackend(machine, heartbeat) {
       const req = http.request(
         {
           hostname: url.hostname,
-          port: url.port || 3001,
+          port: url.port || 5000,
           path: url.pathname,
           method: "POST",
           headers: {
@@ -475,7 +482,7 @@ async function pollMachine(machine) {
     log(
       "INFO",
       `[${miner_ip}] POLL OK | ${metrics.hashrate_ths.toFixed(2)} TH/s | ` +
-        `temp=${maxTemp}°C | power=${metrics.watt}W | uptime=${metrics.uptime_sec}s`,
+      `temp=${maxTemp}°C | power=${metrics.watt}W | uptime=${metrics.uptime_sec}s`,
     );
 
     await sendToBackend(machine, heartbeat);
@@ -564,8 +571,228 @@ async function start() {
   }
 
   // Step 2 — first poll immediately, then on interval.
+  log("INFO", "ABOUT TO CALL connectWebSocket()");
+  connectWebSocket();
+  log("INFO", "ABOUT TO CALL connectWebSocket()  called");
+
   await poll();
   pollTimer = setInterval(poll, POLL_INTERVAL_MS);
+}
+
+//message handler for connectivity testing
+async function handleBackendMessage(msg) {
+  switch (msg.action) {
+    case "CHALLENGE_REQUEST":
+      await runConnectivityTest(msg);
+      break;
+  }
+}
+
+async function runConnectivityTest(msg) {
+
+  log(
+    "INFO",
+    `Connectivity test started for ${msg.machine_id}`
+  );
+
+  const payload =
+    `${msg.testRunId}|${msg.challengeNonce}`;
+
+  const privateKey = fs.readFileSync(
+    path.join(__dirname, "private_key.pem"),
+    "utf8"
+  );
+
+  const signature = crypto
+    .sign(
+      "sha256",
+      Buffer.from(payload),
+      privateKey
+    )
+    .toString("base64");
+
+  log(
+    "INFO",
+    `Challenge signed for ${msg.machine_id}`
+  );
+
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    log("ERROR", "WebSocket not connected");
+    return;
+  }
+
+  ws.send(
+    JSON.stringify({
+      action: "CHALLENGE_RESPONSE",
+      machine_id: msg.machine_id,
+      testRunId: msg.testRunId,
+      challengeNonce: msg.challengeNonce,
+      signature,
+    })
+  );
+
+  log("INFO", "CHALLENGE_RESPONSE sent");
+}
+
+function connectWebSocket() {
+
+  log("INFO", "Connecting to websocket server...");
+
+  ws = new WebSocket("ws://localhost:8080");
+
+  let pingInterval = null;
+  let reconnectTimeout = null;
+
+  ws.on("open", () => {
+
+    log("INFO", "WebSocket OPEN");
+
+    ws.isAlive = true;
+
+    ws.on("pong", () => {
+      ws.isAlive = true;
+    });
+
+    // Reload config every connection/reconnection
+    const config = loadConfig();
+
+    const machineIds = getMachines(config)
+      .map((m) => m.machine_id);
+
+    log(
+      "INFO",
+      `Sending machine ids: ${JSON.stringify(machineIds)}`
+    );
+
+    ws.send(
+      JSON.stringify({
+        action: "AGENT_CONNECTED",
+        machineIds,
+      })
+    );
+
+    // Prevent duplicate ping intervals
+    if (pingInterval) {
+      clearInterval(pingInterval);
+    }
+
+    pingInterval = setInterval(() => {
+
+      if (!ws) {
+        return;
+      }
+
+      if (ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      if (ws.isAlive === false) {
+
+        log(
+          "WARN",
+          "Pong not received. Terminating socket."
+        );
+
+        ws.terminate();
+        return;
+      }
+
+      ws.isAlive = false;
+      ws.ping();
+
+    }, 30000);
+  });
+
+  ws.on("message", async (raw) => {
+
+    console.log("================================");
+    console.log("WS MESSAGE RECEIVED");
+    console.log(raw.toString());
+    console.log("================================");
+
+    log(
+      "INFO",
+      `Received: ${raw.toString()}`
+    );
+
+    let msg;
+
+    try {
+
+      msg = JSON.parse(raw.toString());
+
+    } catch (err) {
+
+      log(
+        "ERROR",
+        `Invalid WS message received: ${raw.toString()}`
+      );
+
+      return;
+    }
+
+    if (!msg || typeof msg !== "object" || !msg.action) {
+
+      log(
+        "ERROR",
+        `Invalid message structure: ${raw.toString()}`
+      );
+
+      return;
+    }
+
+    console.log("ACTION:", msg.action);
+
+    try {
+
+      await handleBackendMessage(msg);
+
+    } catch (err) {
+
+      log(
+        "ERROR",
+        `Failed to process message: ${err.message}`
+      );
+    }
+  });
+
+  ws.on("error", (err) => {
+
+    log(
+      "ERROR",
+      `WebSocket error: ${err.message}`
+    );
+  });
+
+  ws.on("close", () => {
+
+    log("WARN", "WebSocket disconnected");
+
+    if (pingInterval) {
+      clearInterval(pingInterval);
+      pingInterval = null;
+    }
+
+    ws = null;
+
+    // Prevent multiple reconnect loops
+    if (reconnectTimeout) {
+      return;
+    }
+
+    reconnectTimeout = setTimeout(() => {
+
+      reconnectTimeout = null;
+
+      log(
+        "INFO",
+        "Attempting websocket reconnect..."
+      );
+
+      connectWebSocket();
+
+    }, 5000);
+  });
 }
 
 start().catch((err) => {

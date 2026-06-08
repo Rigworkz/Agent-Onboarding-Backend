@@ -1,0 +1,6 @@
+[2026-06-03T05:20:01.376Z] [INFO] Agent starting (multi-rig mode) ...
+[2026-06-03T05:20:01.391Z] [ERROR] Could not read config on startup: ENOENT: no such file or directory, open 'C:\Users\faiza\Rigworkz\rigworkzAPIService\public\scripts\config.json'
+[2026-06-03T05:20:01.393Z] [WARN] fetchWalletAddress failed (continuing without wallet): ENOENT: no such file or directory, open 'C:\Users\faiza\Rigworkz\rigworkzAPIService\public\scripts\config.json'
+[2026-06-03T05:20:01.394Z] [WARN] verifyWallet failed (continuing unverified): ENOENT: no such file or directory, open 'C:\Users\faiza\Rigworkz\rigworkzAPIService\public\scripts\config.json'
+[2026-06-03T05:20:01.394Z] [INFO] ABOUT TO CALL connectWebSocket()
+[2026-06-03T05:20:01.395Z] [ERROR] Fatal: ENOENT: no such file or directory, open 'C:\Users\faiza\Rigworkz\rigworkzAPIService\public\scripts\config.json'
