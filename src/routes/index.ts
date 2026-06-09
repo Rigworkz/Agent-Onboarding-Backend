@@ -27,11 +27,6 @@ import {
   getOperatorProfile,
 } from "../controllers/operatorController";
 
-import {
-  upsertOperatorProfile,
-  getOperatorProfile,
-} from "../controllers/operatorController";
-
 const router = Router();
 
 router.get("/health", getHealth);
@@ -59,16 +54,9 @@ router.get("/machine/:machine_id", authenticateToken, getMachine);
 
 router.get("/machine/:machine_id/status", authenticateToken, getMachineStatus);
 
-router.post(
-  "/run-connectivity-test",
-  authenticateToken,
-  runConnectivityTest
-);
+router.post("/run-connectivity-test", authenticateToken, runConnectivityTest);
 
-router.get(
-  "/connectivity-test/:testRunId",
-  getConnectivityTestResult
-);
+router.get("/connectivity-test/:testRunId", getConnectivityTestResult);
 //router.get('/wallet/:address/machines', authenticateToken, getMachineIdByWallet);
 router.get("/wallet/:address/machines", getMachineIdByWallet);
 
