@@ -41,38 +41,40 @@ export const login = (req: Request, res: Response) => {
 };
 
 export const getNonce = async (req: Request, res: Response) => {
+  let connection;
+
   try {
     const { address } = req.query;
+
     if (!address || typeof address !== "string") {
       return res.status(400).json({ message: "Address is required" });
     }
+
     const normalizedAddress = address.toLowerCase();
     const nonce = crypto.randomBytes(16).toString("hex");
     const sessionId = uuidv4();
     const timestamp = Date.now();
-    const connection = await pool.getConnection();
-    // Remove any old unused sessions for this address
+
+    connection = await pool.getConnection();
+
     await connection.query(
       "DELETE FROM wallet_sessions WHERE operator_wallet = ? AND is_verified = false",
       [normalizedAddress],
     );
-    // Insert new session into the database
-    try {
-      const [result]: any = await connection.query(
-        `INSERT INTO wallet_sessions 
-        (operator_wallet, session_id, nonce, timestamp, is_verified) 
-        VALUES (?, ?, ?, ?, false)`,
-        [normalizedAddress, sessionId, nonce, timestamp],
-      );
-    } catch (err) {
-      console.error("Insert failed", err);
-    }
-    connection.release();
-    // Return nonce and session ID to frontend
+
+    await connection.query(
+      `INSERT INTO wallet_sessions 
+       (operator_wallet, session_id, nonce, timestamp, is_verified) 
+       VALUES (?, ?, ?, ?, false)`,
+      [normalizedAddress, sessionId, nonce, timestamp],
+    );
+
     return res.json({ nonce, sessionId, timestamp });
   } catch (error) {
-    console.error("Nonce error:", error);
+    console.error("GET NONCE ERROR:", error);
     return res.status(500).json({ message: "Internal server error" });
+  } finally {
+    if (connection) connection.release();
   }
 };
 

@@ -15,24 +15,14 @@ if (-not $sid) {
     exit 1
 }
 
-# fallback if param not bound
-if (-not $sid -and $args.Count -gt 0) {
-    $sid = $args[0]
-}
-
 $backend = "http://35.224.207.37:5000"
 $tempFile = "$env:TEMP\rw.ps1"
-
-if (-not $sid) {
-    Write-Host "Missing session id" -ForegroundColor Red
-    exit 1
-}
 
 Write-Host "Fetching install token..." -ForegroundColor Cyan
 
 try {
     $encodedSid = [System.Web.HttpUtility]::UrlEncode($sid)
-$res = Invoke-RestMethod -Uri "$backend/api/install/bootstrap?sid=$encodedSid"
+    $res = Invoke-RestMethod -Uri "$backend/api/install/bootstrap?sid=$encodedSid"
 } catch {
     Write-Host "Failed to fetch token: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
