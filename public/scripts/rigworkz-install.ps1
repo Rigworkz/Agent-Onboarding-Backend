@@ -621,7 +621,7 @@ try {
     Write-Host ""
 
     if ($miner) {
-        Write-Log "OK" "Mining machine found — $($miner.miner_ip) ($($miner.miner_type))"
+        Write-Log "OK" "Mining machine found - $($miner.miner_ip) ($($miner.miner_type))"
     }
     else {
         Write-Log "WARN" "No mining machine found on this network"
