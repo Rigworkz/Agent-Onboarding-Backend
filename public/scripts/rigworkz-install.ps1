@@ -454,7 +454,7 @@ function Discover-Miner {
     }
 
     # Local machine check
-    Write-Log "INFO" "Checking local machine (ports $($MinerPorts -join ' / ')) ..."
+    Write-Log "INFO" "Searching for mining machines in your network ..."
     $localMiner = Test-MinerEndpoint -Ip $ip -PreferredPort 8080
     if ($localMiner) {
         Write-Log "OK" "Miner found on local machine - $($localMiner.miner_ip):$($localMiner.miner_port)"
@@ -467,23 +467,18 @@ function Discover-Miner {
     $meta.total_hosts = $allHosts.Count
 
     Write-Host ""
-    Write-Log "INFO" "Scanning $($allHosts.Count) hosts on ports $($MinerPorts -join '/') ..."
-
     $aliveHosts = @(Get-TcpAliveHosts -Hosts $allHosts -Ports $MinerPorts -TimeoutMs $TcpConnectTimeoutMs)
     $meta.alive_hosts = $aliveHosts.Count
 
     if ($aliveHosts.Count -eq 0) {
-        Write-Log "WARN" "No hosts with open miner ports found"
+        Write-Log "WARN" "No mining machines found on this network"
         $meta.checked_hosts = 0
         return [pscustomobject]@{ Miner = $null; Meta = $meta }
     }
 
-    Write-Log "INFO" "$($aliveHosts.Count) host(s) with open ports - verifying miner ..."
-
     $checked = 0
     foreach ($candidate in $aliveHosts) {
         $checked++
-        Write-Log "INFO" "  Probing $candidate ..."
         $miner = Test-MinerEndpoint -Ip $candidate
         if ($miner) {
             $meta.checked_hosts = $checked
@@ -555,9 +550,18 @@ try {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     }
 
+    Write-Log "INFO" "Checking system requirements ..."
+    $nodeCheck = Test-NodeVersion
+    if (-not $nodeCheck.ok) {
+        Write-Host ""
+        Write-Log "ERR" "$($nodeCheck.reason). Install Node.js >= 14.17 from https://nodejs.org and re-run the installer."
+        exit 1
+    }
+    Write-Log "OK" "Node.js $($nodeCheck.version) ready"
+
     $machineId = [guid]::NewGuid().ToString()
 
-    Write-Log "INFO" "Generating RSA key pair ..."
+    Write-Log "INFO" "Establishing secure gateway connection ..."
     $rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048)
     try {
         $rsaParams     = $rsa.ExportParameters($true)
@@ -572,14 +576,14 @@ try {
     Set-Content -Path $privateKeyPath -Value $privateKeyPem -Encoding Ascii
     cmd /c "icacls `"$privateKeyPath`" /inheritance:r /grant:r `"${env:USERNAME}:F`"" > $null 2>&1
     Set-Content -Path (Join-Path $InstallDir "public_key.pem") -Value $publicKeyPem -Encoding Ascii
-    Write-Log "OK" "RSA key pair ready"
+    Write-Log "OK" "Secure gateway connected"
 
     # ── Register Machine ──────────────────────────────────────────────────────
-    Write-Log "INFO" "Registering machine with backend ..."
+    Write-Log "INFO" "Registering device with RigWorkz ..."
     try {
         $decoded      = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload))
         $installToken = ($decoded | ConvertFrom-Json).installToken
-        if (-not $installToken) { throw "installToken missing from payload" }
+        if (-not $installToken) { throw "installToken missing from RigworkZ" }
 
         $registerBody = @{
             installToken = $installToken
@@ -609,8 +613,6 @@ try {
     Write-Host "   RigWorkz Agent Installer" -ForegroundColor Cyan
     Write-Host "  ================================================" -ForegroundColor DarkCyan
     Write-Host ""
-
-    Write-Log "INFO" "Resolving miner endpoint ..."
     Write-Host ""
 
     $result = Resolve-Miner -ExplicitIp $MinerIp -InstallDir $InstallDir
@@ -619,15 +621,15 @@ try {
     Write-Host ""
 
     if ($miner) {
-        Write-Log "OK" "Miner found - $($miner.miner_ip):$($miner.miner_port) ($($miner.miner_type), auth: $($miner.auth_mode))"
+        Write-Log "OK" "Mining machine found — $($miner.miner_ip) ($($miner.miner_type))"
     }
     else {
-        Write-Log "WARN" "No miner found on this network (checked $($result.Meta.checked_hosts) hosts, $($result.Meta.alive_hosts) with open ports)"
+        Write-Log "WARN" "No mining machine found on this network"
         Write-Log "INFO" "Tip: if the miner is on a different subnet or reachable via Tailscale, re-run with -MinerIp <ip>"
     }
 
     Write-Host ""
-    Write-Log "INFO" "Saving config ..."
+    Write-Log "INFO" "Saving status ..."
     Save-DiscoveryResult `
         -InstallDir $InstallDir `
         -Payload    $Payload `
@@ -637,19 +639,10 @@ try {
         -Miner      $miner `
         -Meta       $result.Meta
 
-    Write-Log "INFO" "Downloading agent ..."
     $agentDest = Join-Path $InstallDir "agent.js"
     Invoke-WebRequest -Uri $AgentUrl -OutFile $agentDest
 
-    $nodeCheck = Test-NodeVersion
-    if (-not $nodeCheck.ok) {
-        Write-Host ""
-        Write-Log "ERR" "$($nodeCheck.reason). Install Node.js >= 14.17 from https://nodejs.org then start the agent manually: node `"$agentDest`""
-        exit 1
-    }
-    Write-Log "INFO" "Node.js $($nodeCheck.version) detected"
-
-    Write-Log "INFO" "Launching agent process ..."
+    Write-Log "INFO" "Starting agent process ..."
     Start-Process -FilePath "node" -ArgumentList "`"$agentDest`"" -WorkingDirectory $InstallDir
 
     Write-Host ""
