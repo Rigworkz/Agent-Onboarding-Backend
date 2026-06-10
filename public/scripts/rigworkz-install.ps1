@@ -427,11 +427,6 @@ function Discover-Miner {
     $prefix  = $cfg.IPv4Address.PrefixLength
     $gateway = $cfg.IPv4DefaultGateway.NextHop
 
-    Write-Log "INFO" "Adapter    : $($cfg.InterfaceAlias)"
-    Write-Log "INFO" "Local IP   : $ip"
-    Write-Log "INFO" "Subnet     : $ip/$prefix"
-    Write-Host ""
-
     $meta = @{
         method        = "local-first + tcp-scan"
         adapter       = $cfg.InterfaceAlias
@@ -444,13 +439,10 @@ function Discover-Miner {
     # Cache check
     $cached = Get-CachedDiscovery -InstallDir $InstallDir
     if ($cached -and $cached.miner_ip) {
-        Write-Log "INFO" "Trying last known miner at $($cached.miner_ip):$($cached.miner_port) ..."
         $cachedMiner = Test-MinerEndpoint -Ip $cached.miner_ip -PreferredPort ([int]($cached.miner_port))
         if ($cachedMiner) {
-            Write-Log "OK" "Miner still reachable - skipping scan"
             return [pscustomobject]@{ Miner = $cachedMiner; Meta = $meta }
         }
-        Write-Log "WARN" "Cached miner not responding, moving on"
     }
 
     # Local machine check
