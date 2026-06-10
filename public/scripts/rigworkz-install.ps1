@@ -625,7 +625,7 @@ try {
     }
     else {
         Write-Log "WARN" "No mining machine found on this network"
-        Write-Log "INFO" "Tip: if the miner is on a different subnet or reachable via Tailscale, re-run with -MinerIp <ip>"
+        Write-Log "INFO" "Tip: if the miner is on a different subnet or reachable via Tailscale, re-run with -MinerIp [ip]"
     }
 
     Write-Host ""
