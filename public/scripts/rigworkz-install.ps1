@@ -687,7 +687,9 @@ try {
 
     # Launch agent
     Write-Log "INFO" "Launching agent process ..."
-    Start-Process -FilePath "node" -ArgumentList "`"$agentDest`"" -WorkingDirectory $InstallDir
+    Start-Process -FilePath "powershell" `
+    -ArgumentList "-NoExit -Command node `"$agentDest`"" `
+    -WorkingDirectory $InstallDir
 
     Write-Host ""
     Write-Log "OK" "Agent is running - monitoring $($miners.Count) miner(s). All done."
