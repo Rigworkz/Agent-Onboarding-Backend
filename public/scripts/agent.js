@@ -228,7 +228,7 @@ async function fetchWalletAddress() {
   );
 
   global.operatorWallet = decryptedBuf.toString("utf8");
-  log("INFO", "Wallet address decrypted successfully");
+  log("INFO", "Connection established with frontend UI");
 }
 
 // ─── Verify install token with backend ───────────────────────────────────────
