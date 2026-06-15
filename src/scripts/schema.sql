@@ -115,3 +115,18 @@ CREATE TABLE IF NOT EXISTS wallet_sessions (
     token_expires_at BIGINT,
     signature TEXT
 );
+CREATE TABLE connectivity_tests (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    test_run_id VARCHAR(255) NOT NULL UNIQUE,
+    machine_id VARCHAR(255) NOT NULL,
+    challenge_nonce VARCHAR(255) NOT NULL,
+
+    network_result BOOLEAN DEFAULT FALSE,
+    security_result BOOLEAN DEFAULT FALSE,
+    heartbeat_result BOOLEAN DEFAULT FALSE,
+
+    status ENUM('PENDING','PASS','FAIL') DEFAULT 'PENDING',
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP NULL
+);

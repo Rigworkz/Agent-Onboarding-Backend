@@ -380,7 +380,8 @@ function Discover-AllMiners {
 
     $cfg = Get-PrimaryIPv4Config
     $ip = $cfg.IPv4Address.IPAddress
-    $prefix = $cfg.IPv4Address.PrefixLength
+    # $prefix = $cfg.IPv4Address.PrefixLength
+    $prefix = 24
     $gateway = $cfg.IPv4DefaultGateway.NextHop
 
     Write-Log "INFO" "Adapter    : $($cfg.InterfaceAlias)"
@@ -688,8 +689,8 @@ try {
     # Launch agent
     Write-Log "INFO" "Launching agent process ..."
     Start-Process -FilePath "powershell" `
-    -ArgumentList "-NoExit -Command node `"$agentDest`"" `
-    -WorkingDirectory $InstallDir
+        -ArgumentList "-NoExit -Command node `"$agentDest`"" `
+        -WorkingDirectory $InstallDir
 
     Write-Host ""
     Write-Log "OK" "Agent is running - monitoring $($miners.Count) miner(s). All done."

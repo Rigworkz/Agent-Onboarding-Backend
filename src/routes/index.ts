@@ -16,12 +16,16 @@ import {
   generateAndSaveFingerprint,
   getMachineIdByWallet,
   registerMachine,
+  runConnectivityTest,
+  getConnectivityTestResult,
+  getUnregisteredMachinesByWallet,
 } from "../controllers/machineController";
 
 import {
   upsertOperatorProfile,
   getOperatorProfile,
 } from "../controllers/operatorController";
+
 
 const router = Router();
 
@@ -31,6 +35,18 @@ router.get("/health", getHealth);
 router.get("/auth/nonce", getNonce);
 router.post("/auth/verify", verifyWallet);
 router.post("/validate-token", validateInstallToken);
+
+router.post(
+  "/run-connectivity-test",
+  authenticateToken,
+  runConnectivityTest
+);
+
+router.get(
+  "/connectivity-test/:testRunId",
+  authenticateToken,
+  getConnectivityTestResult
+);
 
 router.post("/generate-hash", authenticateToken, generateAndSaveFingerprint);
 router.post("/register", registerMachine);
@@ -59,5 +75,10 @@ router.post("/operator/profile", authenticateToken, upsertOperatorProfile);
 router.get("/operator/:operator_wallet", authenticateToken, getOperatorProfile);
 
 router.get("/machines", authenticateToken, getAllMachines);
+router.get(
+  "/machines/unregistered/:walletAddress",
+  authenticateToken,
+  getUnregisteredMachinesByWallet
+);
 
 export default router;

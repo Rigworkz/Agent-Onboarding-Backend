@@ -638,7 +638,8 @@ function connectWebSocket() {
 
   log("INFO", "Connecting to websocket server...");
 
-  ws = new WebSocket("ws://localhost:8080");
+  //ws = new WebSocket("ws://localhost:8080");
+  ws = new WebSocket("ws://35.224.207.37:8080");
 
   let pingInterval = null;
   let reconnectTimeout = null;
