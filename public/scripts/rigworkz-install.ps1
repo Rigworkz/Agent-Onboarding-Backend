@@ -1,9 +1,9 @@
 param(
     [string]$Payload,
-    # [string]$BackendUrl = "http://35.224.207.37:5000",
-    # [string]$AgentUrl = "http://35.224.207.37:5000/scripts/agent.js",
-    [string]$BackendUrl = "http://localhost:5000",
-    [string]$AgentUrl = "http://localhost:5000/scripts/agent.js",
+    [string]$BackendUrl = "http://35.224.207.37:5000",
+    [string]$AgentUrl = "http://35.224.207.37:5000/scripts/agent.js",
+    # [string]$BackendUrl = "http://localhost:5000",
+    # [string]$AgentUrl = "http://localhost:5000/scripts/agent.js",
     [string]$InstallDir = "C:\rigworkz-agent",
     [string]$MinerUser = "root",
     [string]$MinerPass = "root",
