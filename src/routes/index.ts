@@ -5,9 +5,7 @@ import { authenticateToken } from "../middleware/auth";
 import {
   verifyWallet,
   validateInstallToken,
-  bootstrapInstall,
 } from "../controllers/authController";
-
 import {
   onboardMachine,
   getMachine,
@@ -28,10 +26,6 @@ import {
   getOperatorProfile,
 } from "../controllers/operatorController";
 
-// import {
-//   upsertOperatorProfile,
-//   getOperatorProfile,
-// } from "../controllers/operatorController";
 
 const router = Router();
 
@@ -41,7 +35,18 @@ router.get("/health", getHealth);
 router.get("/auth/nonce", getNonce);
 router.post("/auth/verify", verifyWallet);
 router.post("/validate-token", validateInstallToken);
-router.get("/install/bootstrap", bootstrapInstall);
+
+router.post(
+  "/run-connectivity-test",
+  authenticateToken,
+  runConnectivityTest
+);
+
+router.get(
+  "/connectivity-test/:testRunId",
+  authenticateToken,
+  getConnectivityTestResult
+);
 
 router.post("/generate-hash", authenticateToken, generateAndSaveFingerprint);
 router.post("/register", registerMachine);
@@ -60,16 +65,6 @@ router.get("/machine/:machine_id", authenticateToken, getMachine);
 
 router.get("/machine/:machine_id/status", authenticateToken, getMachineStatus);
 
-router.post(
-  "/run-connectivity-test",
-  authenticateToken,
-  runConnectivityTest
-);
-
-router.get(
-  "/connectivity-test/:testRunId",
-  getConnectivityTestResult
-);
 //router.get('/wallet/:address/machines', authenticateToken, getMachineIdByWallet);
 router.get("/wallet/:address/machines", getMachineIdByWallet);
 

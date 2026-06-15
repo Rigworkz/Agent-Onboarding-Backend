@@ -589,11 +589,11 @@ export const getUnregisteredMachinesByWallet = async (
     res: Response
 ) => {
     let connection;
-    console.log(1);
+
     try {
         const { walletAddress } = req.params;
 
-        console.log(2);
+
         if (!walletAddress) {
             console.log(3);
             return res.status(400).json({
@@ -614,12 +614,12 @@ export const getUnregisteredMachinesByWallet = async (
             `,
             [wallet]
         );
-        console.log(4);
+
         return res.status(200).json({
             success: true,
             machines: rows,
         });
-        console.log(1);
+
 
     } catch (error) {
         console.error("Error fetching unregistered machines:", error);

@@ -21,8 +21,8 @@ const MINER_PASS = "root";
 let isClaimable = false;
 let verificationDone = false;
 let verificationMessage = "Pending";
-let backendUrl = "http://35.224.207.37:5000";
-//let backendUrl = "http://localhost:5000";
+//let backendUrl = "http://35.224.207.37:5000";
+let backendUrl = "http://localhost:5000";
 let lastHeartbeatAt = null;
 let pollTimer = null;
 
@@ -638,8 +638,8 @@ function connectWebSocket() {
 
   log("INFO", "Connecting to websocket server...");
 
-  //ws = new WebSocket("ws://localhost:8080");
-  ws = new WebSocket("ws://35.224.207.37:8080");
+  ws = new WebSocket("ws://localhost:8080");
+  //ws = new WebSocket("ws://35.224.207.37:8080");
 
   let pingInterval = null;
   let reconnectTimeout = null;
