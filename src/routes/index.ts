@@ -20,6 +20,7 @@ import {
   registerMachine,
   runConnectivityTest,
   getConnectivityTestResult,
+  getUnregisteredMachinesByWallet,
 } from "../controllers/machineController";
 
 import {
@@ -27,10 +28,10 @@ import {
   getOperatorProfile,
 } from "../controllers/operatorController";
 
-import {
-  upsertOperatorProfile,
-  getOperatorProfile,
-} from "../controllers/operatorController";
+// import {
+//   upsertOperatorProfile,
+//   getOperatorProfile,
+// } from "../controllers/operatorController";
 
 const router = Router();
 
@@ -79,5 +80,10 @@ router.post("/operator/profile", authenticateToken, upsertOperatorProfile);
 router.get("/operator/:operator_wallet", authenticateToken, getOperatorProfile);
 
 router.get("/machines", authenticateToken, getAllMachines);
+router.get(
+  "/machines/unregistered/:walletAddress",
+  authenticateToken,
+  getUnregisteredMachinesByWallet
+);
 
 export default router;

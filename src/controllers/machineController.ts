@@ -152,7 +152,7 @@ export const getMachine = async (req: Request, res: Response) => {
             m.worker_id,
             m.fingerprint,
             m.created_at,
-            m.signature,
+            
             s.status,
             s.hashrate,
             s.uptime,
@@ -293,17 +293,17 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
     let connection;
 
     try {
-        const { address, signature } = req.body;
+        const { machineId } = req.body;
 
-        if (!address || !signature) {
+        if (!machineId) {
             return res.status(400).json({ message: "Missing required fields" });
         }
         connection = await pool.getConnection();
 
         // 1. Get machine_id using address
         const [machineRows]: any = await connection.execute(
-            `SELECT machine_id, fingerprint FROM machines WHERE operator_wallet = ?`,
-            [address]
+            `SELECT * FROM machines WHERE machine_id = ?`,
+            [machineId]
         );
         if (machineRows.length === 0) {
             return res.status(404).json({ message: "Machine not found" });
@@ -315,21 +315,9 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
                 message: "Machine is already registered"
             });
         }
-        const machineId = machine.machine_id;
-        //  2. Fetch latest telemetry
-        // const [telemetryRows]: any = await connection.execute(
-        //     `SELECT * FROM machine_telemetry 
-        //      WHERE machine_id = ? 
-        //      ORDER BY timestamp DESC 
-        //      LIMIT 1`,
-        //     [machineId]
-        // );
-        // if (telemetryRows.length === 0) {
-        //     return res.status(404).json({ message: "Telemetry not found" });
-        // }
-        //const telemetry = telemetryRows[0];
-        //  3. Create payload
+
         const parent_secret = process.env.PARENT_SIGN_SECRET;
+        const address = machine.operator_wallet;
         const payload = {
             machineId,
             address,
@@ -343,8 +331,8 @@ export const generateAndSaveFingerprint = async (req: Request, res: Response) =>
             .digest("hex");
         //  5. Update machines table
         await connection.execute(
-            `UPDATE machines SET fingerprint = ? WHERE operator_wallet = ?`,
-            [fingerprint, address]
+            `UPDATE machines SET fingerprint = ? WHERE machine_id = ?`,
+            [fingerprint, machineId]
         );
 
         return res.json({ fingerprint, machineId });
@@ -441,12 +429,12 @@ export const runConnectivityTest = async (req: Request, res: Response) => {
     let connection;
 
     try {
-        const { walletAddress } = req.body;
+        const { machineId } = req.body;
 
-        if (!walletAddress) {
+        if (!machineId) {
             return res.status(400).json({
                 success: false,
-                message: "Wallet address is required",
+                message: "machineId is required",
             });
         }
 
@@ -456,11 +444,10 @@ export const runConnectivityTest = async (req: Request, res: Response) => {
             `
             SELECT *
             FROM machines
-            WHERE operator_wallet = ?
-            ORDER BY created_at DESC
+            WHERE machine_id = ?
             LIMIT 1
             `,
-            [walletAddress]
+            [machineId]
         );
 
         if (machineRows.length === 0) {
@@ -546,6 +533,7 @@ export const getConnectivityTestResult = async (
             `
             SELECT
                 test_run_id,
+                machine_id,
                 status,
                 network_result,
                 security_result,
@@ -569,7 +557,10 @@ export const getConnectivityTestResult = async (
 
         return res.status(200).json({
             success: true,
+
+            machineId: test.machine_id,
             testRunId: test.test_run_id,
+
             status: test.status,
 
             network: Boolean(test.network_result),
@@ -582,6 +573,57 @@ export const getConnectivityTestResult = async (
     } catch (error) {
         console.error(error);
 
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error",
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
+    }
+};
+
+export const getUnregisteredMachinesByWallet = async (
+    req: Request,
+    res: Response
+) => {
+    let connection;
+    console.log(1);
+    try {
+        const { walletAddress } = req.params;
+
+        console.log(2);
+        if (!walletAddress) {
+            console.log(3);
+            return res.status(400).json({
+                success: false,
+                message: "Wallet address is required",
+            });
+        }
+        const wallet = String(walletAddress).toLowerCase();
+        connection = await pool.getConnection();
+
+        const [rows]: any = await connection.execute(
+            `
+            SELECT *
+            FROM machines
+            WHERE operator_wallet = ?
+            
+            ORDER BY created_at DESC
+            `,
+            [wallet]
+        );
+        console.log(4);
+        return res.status(200).json({
+            success: true,
+            machines: rows,
+        });
+        console.log(1);
+
+    } catch (error) {
+        console.error("Error fetching unregistered machines:", error);
+        console.log(5);
         return res.status(500).json({
             success: false,
             message: "Internal server error",
